@@ -124,21 +124,50 @@ When you're running hundreds of game servers across multiple games, you need inf
 
 ### Cold Start → Server Wake Flow
 
-The most complex subsystem. A player connects to a hibernated server and the wake-up should be invisible.
+The most complex subsystem — and the platform's core differentiator. A player connects to a hibernated server, and the infrastructure orchestration intercepts, wakes the specific Kubernetes pod, and forwards the buffered packet context seamlessly.
 
 ```mermaid
-flowchart TD
-    A[Player connects TCP :25565] --> B[platform-proxy<br/>intercepts connection]
-    B --> C{Check server state<br/>via hibernation-service API}
-    C -->|RUNNING| D[Forward TCP immediately]
-    C -->|HIBERNATED| E[Buffer TCP connection<br/>Call wake API]
-    E --> F[hibernation-service<br/>Scale K8s 0→1<br/>Restore world state]
-    F --> G[Readiness probe passes<br/>Game server accepting connections]
-    G --> H[Forward buffered connection<br/>Player connects seamlessly]
+sequenceDiagram
+    actor Player as Minecraft Client
+    participant Proxy as Netty GameProxyServer
+    participant Hiber as HibernationService
+    participant Kafka as Redpanda Event Bus
+    participant Srv as ServerService
+    participant K8s as Kubernetes API
 
-    style D fill:#3fb950,color:#fff
-    style E fill:#f85149,color:#fff
-    style H fill:#3fb950,color:#fff
+    Player->>Proxy: TCP SYN (:25565)
+    
+    rect rgb(60, 20, 20)
+        Note over Proxy: Edge Defense Perimeter
+        Proxy->>Proxy: Enforce PROXY_MAX_CONNECTIONS_PER_IP
+        Proxy->>Proxy: Assert IdleStateHandler read/write limits
+    end
+    
+    Proxy->>Hiber: Check Server State (REST API)
+    
+    alt State == HIBERNATED / WARM
+        Hiber-->>Proxy: HTTP 200 (State: WARM)
+        Proxy->>Proxy: Buffer TCP connection bytes
+        
+        rect rgb(20, 20, 50)
+            Note over Hiber,K8s: Asynchronous Kubernetes Orchestration
+            Hiber->>Kafka: Publish WAKE_REQUEST
+            Kafka-->>Srv: Consume WAKE_REQUEST
+            Srv->>K8s: Wake Pod (docker-unpause / scale 0→1)
+        end
+        
+        K8s-->>Srv: Readiness Probe Passes
+        Srv->>Kafka: Publish STATUS_CHANGED (ACTIVE)
+        Kafka-->>Hiber: Consume ACTIVE Status
+        
+        Hiber-->>Proxy: Notify proxy (internal signal)
+        Proxy->>K8s: Flush buffered TCP bytes to Pod IP
+        K8s-->>Player: Seamless TCP connection established
+        
+    else State == ACTIVE
+        Hiber-->>Proxy: HTTP 200 (State: ACTIVE)
+        Proxy->>K8s: Forward TCP immediately
+    end
 ```
 
 **Warm sleep** (paid tiers): Server transitions to a `WARM` state via Docker container pausing orchestrated by the `HibernationService`. This avoids killing the process, preserving RAM state and delivering sub-1-second wake times natively tracked by `PlatformMetrics`. 
