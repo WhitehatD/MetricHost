@@ -141,8 +141,10 @@ flowchart TD
     style H fill:#3fb950,color:#fff
 ```
 
-**Warm sleep** (paid tiers): server state stays in memory → ~1-3s wake. Same pattern as AWS Lambda warm starts.
-**Cold boot** (free tier): state restored from MinIO → ~30-60s wake.
+**Warm sleep** (paid tiers): Server transitions to a `WARM` state via Docker container pausing orchestrated by the `HibernationService`. This avoids killing the process, preserving RAM state and delivering sub-1-second wake times natively tracked by `PlatformMetrics`. 
+**Cold boot** (free tier): Server enters the `HIBERNATED` state; state is persisted to MinIO and the container is destroyed → ~30-60s wake.
+
+The `GameProxyServer` is a custom **Netty TCP proxy** using `NioEventLoopGroup`. When it receives a packet for a hibernated server, it adds the connection to a `ConcurrentHashMap` and buffers the bytes. Upon the `HibernationService` publishing a Kafka `WAKE_REQUEST`, the actual K8s pod is spawned by `server-service`. Once the readiness probe passes, Netty flushes the buffer to the fresh pod—achieving a fully seamless wake-on-connect.
 
 ---
 
@@ -302,8 +304,9 @@ If an endpoint changes shape, the build fails before deployment.
 | Brute-force auth | IP-based rate limiting, tier-bucketed |
 | Multi-account farming | Redis IP counter — 3 registrations/IP/24h, fail-open |
 | WebSocket abuse | Separate rate limiter (5 conn/s, burst 10) |
+| TCP Connection Bombing | Netty `GameProxyServer` enforces `PROXY_MAX_CONNECTIONS_PER_IP` and `PROXY_MAX_CONNECTIONS_PER_SERVER` atomic counters. Drops fast via `IdleStateHandler` on read/write timeouts. |
 | Crypto mining | CPU abuse detection, automated pod termination |
-| BOLA/IDOR | Owner-ID validation on every resource, fail-closed |
+| BOLA/IDOR | Fall-closed ownership validation on every resource via `validateOwnership(status, userId)` |
 | JWT confusion | Algorithm pinned to HS256 |
 | Info disclosure | Actuator restricted, heapdump/threaddump disabled |
 | Service spoofing | M2M API key on all `/internal/**` endpoints |
@@ -336,11 +339,12 @@ The interface uses a macOS-inspired desktop metaphor: draggable/resizable window
 
 | Metric | Count |
 |--------|-------|
-| Backend (Java) | 41,217 lines across 502 files |
-| Frontend (TypeScript) | 23,072 lines across 120 files |
+| **Total Project Scale** | **91,000+ lines of code** running the production cluster |
+| Backend (Java) | ~43,100 lines across 507 component files |
+| Frontend (TypeScript/TSX) | ~28,300 lines across 126 component files |
+| Kubernetes Infrastructure | ~16,800 lines of YAML orchestrations |
 | Test code | 22,097 lines across 206 test files |
-| Flyway migrations | 45 versioned migrations |
-| K8s manifests | 32 YAML files |
+| Flyway migrations | 46 versioned migrations (~1,400 LOC) |
 | CI/CD pipelines | 499-line backend + 229-line frontend |
 
 ---
