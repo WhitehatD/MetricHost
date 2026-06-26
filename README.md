@@ -11,9 +11,12 @@
 <p align="center">
   <img alt="Java 21" src="https://img.shields.io/badge/java-21-ED8B00?logo=openjdk&logoColor=white" />
   <img alt="Spring Boot 3.4" src="https://img.shields.io/badge/spring_boot-3.4-6DB33F?logo=spring&logoColor=white" />
-  <img alt="Next.js 15" src="https://img.shields.io/badge/next.js-15-000000?logo=next.js&logoColor=white" />
+  <img alt="Go" src="https://img.shields.io/badge/go-00ADD8?logo=go&logoColor=white" />
+  <img alt="Next.js 16" src="https://img.shields.io/badge/next.js-16-000000?logo=next.js&logoColor=white" />
   <img alt="TypeScript 5" src="https://img.shields.io/badge/typescript-5-3178C6?logo=typescript&logoColor=white" />
-  <img alt="Kubernetes" src="https://img.shields.io/badge/kubernetes-k3s-326CE5?logo=kubernetes&logoColor=white" />
+  <img alt="Kubernetes k3s" src="https://img.shields.io/badge/kubernetes-k3s-326CE5?logo=kubernetes&logoColor=white" />
+  <img alt="Cilium eBPF" src="https://img.shields.io/badge/cilium-eBPF-F8C517?logo=cilium&logoColor=white" />
+  <img alt="Terraform IaC" src="https://img.shields.io/badge/terraform-IaC-7B42BC?logo=terraform&logoColor=white" />
   <img alt="PostgreSQL 16" src="https://img.shields.io/badge/postgresql-16-4169E1?logo=postgresql&logoColor=white" />
   <img alt="Redis 7" src="https://img.shields.io/badge/redis-7-DC382D?logo=redis&logoColor=white" />
   <img alt="Kafka" src="https://img.shields.io/badge/kafka-redpanda-E62127?logo=apachekafka&logoColor=white" />
@@ -31,8 +34,8 @@ I designed and built this end-to-end — from application code to bare metal: 10
 |---|---|
 | **What** | Multi-game server hosting platform (Minecraft, Valheim, Terraria, etc.) |
 | **Backend** | 10+ Spring Boot microservices, each with its own database schema |
-| **Frontend** | Next.js 15 with a custom macOS-inspired desktop UI |
-| **Infra** | Kubernetes-orchestrated game server pods with per-tier resource limits |
+| **Frontend** | Next.js 16 with a custom macOS-inspired desktop UI |
+| **Infra** | Self-managed multi-region k3s · eBPF/Cilium · Terraform/Ansible IaC · game pods with per-tier resource limits |
 | **Key innovation** | Warm-sleep hibernation with TCP wake-on-connect (sub-second resume for paid tiers) |
 
 ---
@@ -407,4 +410,4 @@ End-to-end ownership, from application code to bare metal:
 
 **Alexandru Cioc** · [@WhitehatD](https://github.com/WhitehatD)
 
-CS @ Maastricht University · Distributed systems · Security-first engineering
+CS @ Maastricht University · Platform & infrastructure · Distributed systems · Security-first engineering
