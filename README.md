@@ -5,7 +5,7 @@
 <h1 align="center">MetricHost</h1>
 
 <p align="center">
-  <em>Intelligent game server infrastructure — microservice orchestration, warm-sleep hibernation, and wake-on-connect — built and deployed as a production SaaS.</em>
+  <em>A production game-server hosting platform built end-to-end — from a Next.js dashboard and 10+ Spring Boot microservices down to the bare-metal Kubernetes, eBPF/Cilium networking, and Terraform/Ansible infrastructure it runs on.</em>
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 
 ---
 
-I designed and built this end-to-end: 10+ Spring Boot microservices, a Kubernetes orchestration layer, Stripe billing, event-driven GDPR compliance, and a 5-stage CI/CD pipeline with selective deploys. Source code is proprietary — this repo documents the architecture and engineering decisions.
+I designed and built this end-to-end — from application code to bare metal: 10+ Spring Boot microservices, a Kubernetes orchestration layer, Stripe billing, event-driven GDPR compliance, and a 5-stage CI/CD pipeline with selective deploys — plus the platform underneath: self-managed multi-node k3s across regions, a flannel→Cilium (eBPF) CNI migration, full Infrastructure-as-Code (Terraform + Ansible + Packer), disaster-recovery backups, and a Prometheus/Grafana/Loki observability stack. Source code is proprietary — this repo documents the architecture and engineering decisions.
 
 ---
 
@@ -117,6 +117,20 @@ When you're running hundreds of game servers across multiple games, you need inf
 | Abuse detection | Manual admin intervention | Automated CPU abuse detection + IP tracking |
 | Deploys | Full downtime redeploy | Selective — only changed services restart |
 | Cross-service comms | Shared database queries | Async Kafka events (decoupled lifecycles) |
+
+---
+
+## Infrastructure & Platform Engineering
+
+Beyond the application, I built and operated the platform it runs on — the layer most "I shipped a SaaS" projects never touch.
+
+- **Self-managed Kubernetes, multi-node, multi-region.** Bare-metal k3s clusters (not managed EKS/GKE) across separate production and staging environments, designed for multi-region federation — I brought a US region online end-to-end with per-region scheduling, overlays, network policies, and image distribution.
+- **CNI migration to Cilium (eBPF).** Migrated cluster networking from flannel to Cilium with kube-proxy-replacement and identity-based `CiliumNetworkPolicy` — cross-node datapath, stale flannel-device cleanup, and apiserver/pod-CIDR policy rewrites. Validated the entire cutover on disposable throwaway clusters before touching production.
+- **Infrastructure-as-Code, end to end.** Terraform (provisioning) + Ansible (configuration + security hardening) + Packer (golden images) + cloud-init — reproducible bring-up of control-plane, worker, and regional nodes. Servers are cattle, not pets.
+- **Disaster recovery.** Automated, encrypted, fail-closed off-site PostgreSQL backups with verified restores — a backup that silently produces an empty file is caught, never trusted.
+- **Observability & autoscaling.** Prometheus + Grafana + Loki + Alertmanager + blackbox probes; horizontal pod autoscaling driven by metrics-server.
+- **Edge & networking.** Cloudflare tunnels for zero-open-port ingress and SSH, Traefik routing, automated TLS via cert-manager, and network-policy isolation between platform and game-server workloads.
+- **Real-time at the edge.** Live server console and metrics streamed to the browser over WebSocket/STOMP, fanned out across replicas via Kafka consumer groups, traversing Cloudflare → Traefik → gateway → pod — plus RCON command execution.
 
 ---
 
@@ -375,6 +389,17 @@ The interface uses a macOS-inspired desktop metaphor: draggable/resizable window
 | Test code | 22,097 lines across 206 test files |
 | Flyway migrations | 46 versioned migrations (~1,400 LOC) |
 | CI/CD pipelines | 499-line backend + 229-line frontend |
+
+---
+
+## What this demonstrates
+
+End-to-end ownership, from application code to bare metal:
+
+- **Platform / SRE** — self-managed Kubernetes (k3s), eBPF/Cilium networking, Infrastructure-as-Code (Terraform · Ansible · Packer), disaster recovery, observability, multi-region federation.
+- **Backend** — Java 21 / Spring Boot microservices, Go services, event-driven architecture (Kafka/Redpanda), PostgreSQL, Redis.
+- **Frontend** — Next.js / React / TypeScript with real-time WebSocket UIs.
+- **Distributed systems & security** — decoupled services, fail-closed authorization (BOLA/IDOR), network isolation, automated abuse detection, contract-tested API boundaries.
 
 ---
 
