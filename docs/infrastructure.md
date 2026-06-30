@@ -251,10 +251,10 @@ A grace period (`OrphanGracePeriod`, typically several minutes) prevents the rec
 
 The platform migrated from flannel (the k3s default CNI) to Cilium eBPF for two reasons:
 
-1. **eBPF datapath:** Cilium processes packets and enforces network policy in the kernel via eBPF programs and maps rather than long iptables chains, which scale poorly as the number of services and policies grows.
+1. **eBPF policy enforcement:** k3s's built-in NetworkPolicy controller is disabled (`disable-network-policy: true`) so Cilium owns network policy, enforcing it in the kernel via eBPF programs and maps keyed on workload *identity* rather than per-IP iptables rules — which scales as the number of pods and policies grows.
 2. **`CiliumNetworkPolicy`:** Identity-based (rather than IP-based) network policies. Cilium assigns a numeric identity to each pod group (namespace + label selector) and enforces policies in BPF maps. The `game-servers` namespace is isolated from `metrichost` by a policy that blocks egress from game pods to the platform namespace — a compromised game mod cannot reach the billing API or any other platform service.
 
-The install keeps kube-proxy in place (`kubeProxyReplacement` is **not** enabled); the win here is the eBPF policy datapath and identity-based isolation, not kube-proxy elimination.
+This deployment is **not** run in kube-proxy-replacement mode: the install recipe sets `ipam.mode=kubernetes` + the k3s CNI paths but no `kubeProxyReplacement`, so k3s's kube-proxy stays and continues to handle Service/NodePort routing via iptables (the `platform-proxy` NodePort path depends on exactly that). The win Cilium buys here is eBPF-based, identity-aware *network-policy* enforcement, not kube-proxy elimination.
 
 ### Migration methodology
 

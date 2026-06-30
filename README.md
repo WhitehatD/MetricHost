@@ -42,7 +42,7 @@ Source code is proprietary. This repository documents the architecture and the e
 | **Frontend** | Next.js 16 · TypeScript 5 — a macOS-inspired desktop UI for users, plus a separate operator console |
 | **Infra** | Self-managed multi-region k3s · Cilium eBPF CNI · Terraform / Ansible / Packer / cloud-init · Temporal-orchestrated burst autoscaler |
 | **Key innovation** | A four-rung [hibernation idle ladder](docs/hibernation.md) that reclaims idle RAM and resells it — turning a RAM-constrained business into a density play |
-| **Scale** | 6 repositories · 160,000+ lines across application code and Infrastructure-as-Code · multi-node k3s clusters across two live regions |
+| **Scale** | 6 repositories · ~200,000 lines across application code, tests, and Infrastructure-as-Code · multi-node k3s clusters across two live regions |
 
 ---
 
@@ -252,7 +252,7 @@ The operator console is a physically separate plane: a Next.js operator frontend
 
 - **Read-only by default, two pgx pools.** `admin_api_ro` is SELECT-only across the platform schemas. `admin_api_rw` can write to exactly two tables: `auth.user_roles` and `audit.admin_actions`. There is no general-purpose write path into platform data.
 - **RBAC: 5 roles × 11 scopes.** Roles: `READ_ONLY`, `SUPPORT`, `BILLING_OPS`, `ADMIN`, `SUPER_ADMIN`. Scopes include `audit:read`, `user:read/write`, `billing:read/write`, `server:read/write`, `impersonate`, `roles:write`, `ops:write`. Every endpoint is scope-gated; `ops:write` (Temporal workflow triggers) is restricted to `SUPER_ADMIN` only.
-- **Two-person approval for high-risk ops.** Impersonation and refunds require one admin to initiate and a *different* admin to approve — self-approval is blocked at the handler level. Requests expire after 15 minutes (`ApprovalTTL = 15 * time.Minute`).
+- **Two-person approval for impersonation.** Impersonation requires one `SUPER_ADMIN` to initiate and a *different* `SUPER_ADMIN` to approve — self-approval is blocked at the handler level, and requests expire after 15 minutes (`ApprovalTTL = 15 * time.Minute`). (Refunds are scope-gated to `BILLING_OPS`/`SUPER_ADMIN` and audit-logged, but issued directly rather than through the two-person flow.)
 - **MFA freshness on every mutation.** Each non-GET request requires a fresh TOTP claim; stale-MFA tokens are rejected fail-closed. Auth is JWT validated against the auth-service JWKS endpoint.
 - **Audit trail.** Every operator mutation is written to `audit.admin_actions`.
 - **Network isolation.** `CiliumNetworkPolicy` lets admin-api reach auth-service (JWKS) and server-service (M2M SSE metrics) only; it has no path to the game-servers namespace.
@@ -410,9 +410,9 @@ Defense-in-depth, fail-closed by default.
 | JWT confusion / algorithm substitution | RS256 with RSA-2048 keypair; `kid`-based JWKS rotation; `RsaJwtVerifier` pins RS256 — `alg=none` and `alg=HS256` tokens are rejected |
 | BOLA / IDOR | Every resource endpoint asserts authenticated `userId == ownerId` before any business logic; fail-closed |
 | Tenant starvation | Tier-bucketed Redis rate limits — a free-tier flood cannot exhaust paid capacity |
-| Operator privilege abuse | Two-person approval on impersonation + refunds (self-approval blocked, `ApprovalTTL = 15 min`); MFA freshness on all mutations; RBAC 5 roles × 11 scopes |
+| Operator privilege abuse | Two-person approval on impersonation — different `SUPER_ADMIN` initiates vs. approves (self-approval blocked, `ApprovalTTL = 15 min`); MFA freshness on all mutations; RBAC 5 roles × 11 scopes |
 | Operator data exfiltration | admin-api read-only by default; writes limited to `auth.user_roles` + `audit.admin_actions`; every mutation audited in `audit.admin_actions` |
-| Service spoofing | M2M `X-Internal-Key` required on all `/internal/**` endpoints |
+| Service spoofing | M2M `X-Internal-Api-Key` required on all `/internal/**` endpoints |
 | Cross-namespace breach | `CiliumNetworkPolicy` isolates `metrichost`, `game-servers`, `metrichost-admin-api`, `metrichost-system`; game-servers cannot reach the platform namespace |
 | Multi-account farming | Redis IP counter — 3 registrations / IP / 24h; separate WebSocket rate limit |
 | Crypto-mining / CPU abuse | Automated CPU-abuse detection → pod termination |
@@ -437,7 +437,7 @@ The **operator console** (`platform-admin`, 69 source files, 9,643 lines) is a s
 
 ## Testing
 
-No mocks for integration tests — real infrastructure via Testcontainers. 2,248 test source files in the Java backend alone.
+No mocks for integration tests — real infrastructure via Testcontainers. ~300 test source files in the Java backend alone (~50K lines of test code).
 
 | Layer | Framework | Coverage |
 |---|---|---|
@@ -460,13 +460,13 @@ No mocks for integration tests — real infrastructure via Testcontainers. 2,248
 | **frontend** (user) | Next.js 16 · TS 5 | 178 TS/TSX files · 47,734 lines |
 | **platform-admin** (operator) | Next.js 16 · TS | 69 TS/TSX files · 9,643 lines |
 | **admin-api** | Go · pgx | 95 `.go` files · 16,575 lines |
-| **platform-control-plane** | Go · Temporal · Terraform | 270 `.go` files · 64,757 lines |
-| **Terraform / cloud-init** | HCL · cloud-init | 16,371 lines |
+| **platform-control-plane** | Go · Temporal · Terraform | 72 `.go` files · 18,020 lines |
+| **Terraform / cloud-init** | HCL · cloud-init | ~4,500 lines |
 | **K8s infra manifests** | YAML | 9,584 lines |
-| **backend** | Java 21 · Spring Boot 3.4 | 3,325 source + 2,248 test files across 11 Gradle subprojects (>100K lines) |
-| **schema** | Flyway | 50+ migration versions across 11 service schemas |
+| **backend** | Java 21 · Spring Boot 3.4 | 446 main + 299 test files across 11 Gradle subprojects (~100K lines) |
+| **schema** | Flyway | 70 migration versions across 11 service schemas |
 
-**Total: 6 repositories, 160,000+ lines across application code and Infrastructure-as-Code**, deployed to multi-node k3s clusters across two live regions.
+**Total: 6 repositories, ~200,000 lines across application code, tests, and Infrastructure-as-Code**, deployed to multi-node k3s clusters across two live regions.
 
 ---
 
