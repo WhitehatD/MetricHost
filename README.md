@@ -5,7 +5,7 @@
 <h1 align="center">MetricHost</h1>
 
 <p align="center">
-  <em>A production game-server hosting platform built end-to-end — from a Next.js dashboard and 10+ Spring Boot microservices down to a Go control-plane autoscaler, Temporal-orchestrated burst provisioning, multi-region Kubernetes federation, eBPF/Cilium networking, and full Infrastructure-as-Code.</em>
+  <em>A production, multi-tenant game-server hosting platform built end-to-end — from a Next.js desktop UI and a fleet of Spring Boot microservices, through a Go control plane with Temporal-orchestrated burst provisioning, down to multi-region self-managed Kubernetes, eBPF networking, and full Infrastructure-as-Code.</em>
 </p>
 
 <p align="center">
@@ -20,14 +20,16 @@
   <img alt="Terraform IaC" src="https://img.shields.io/badge/terraform-IaC-7B42BC?logo=terraform&logoColor=white" />
   <img alt="PostgreSQL 16" src="https://img.shields.io/badge/postgresql-16-4169E1?logo=postgresql&logoColor=white" />
   <img alt="Redis 7" src="https://img.shields.io/badge/redis-7-DC382D?logo=redis&logoColor=white" />
-  <img alt="Kafka" src="https://img.shields.io/badge/kafka-redpanda-E62127?logo=apachekafka&logoColor=white" />
+  <img alt="Kafka / Redpanda" src="https://img.shields.io/badge/kafka-redpanda-E62127?logo=apachekafka&logoColor=white" />
 </p>
 
 ---
 
-I designed and built this end-to-end — from application code to bare metal. The platform spans 10+ Spring Boot microservices, a Go-based control-plane autoscaler (Temporal-orchestrated burst provisioning), a separate Go admin API, a Next.js user-facing frontend and operator console, Stripe billing, event-driven GDPR compliance, and a 5-stage CI/CD pipeline — sitting on self-managed multi-node k3s clusters across two regions, a flannel→Cilium (eBPF) CNI migration, full Infrastructure-as-Code (Terraform + Ansible + Packer), disaster-recovery backups, and a Prometheus/Grafana/Loki observability stack.
+MetricHost is an enterprise-grade, multi-tenant game-server hosting platform — comparable in scope to Pterodactyl plus Vercel, but architected as a distributed system rather than a panel. It supports Minecraft, Valheim, Terraria, Rust, and more.
 
-Source code is proprietary — this repo documents the architecture and engineering decisions.
+I architected and built it end-to-end: nine Spring Boot microservices plus a gateway and a TCP proxy, two Go services (a read-only operator API and a control-plane autoscaler), a Next.js user desktop and a separate operator console, Stripe billing, event-driven GDPR compliance, and a six-repository CI/CD system — all running on self-managed multi-region k3s clusters with a flannel→Cilium (eBPF) CNI migration, full Infrastructure-as-Code (Terraform + Ansible + Packer + cloud-init), encrypted off-site disaster-recovery backups, and a Prometheus/Grafana/Loki observability stack.
+
+Source code is proprietary. This repository documents the architecture and the engineering decisions behind it.
 
 ---
 
@@ -35,223 +37,234 @@ Source code is proprietary — this repo documents the architecture and engineer
 
 | | |
 |---|---|
-| **What** | Multi-game server hosting platform (Minecraft, Valheim, Terraria, Rust, and more) |
-| **User plane** | 10+ Spring Boot microservices · Next.js 16 dashboard · Stripe billing |
-| **Operator plane** | Go admin API · Next.js operator console (separate domain, separate auth tier) |
-| **Control plane** | Go autoscaler · Temporal workflows · Hetzner burst provisioning · orphan reconciliation |
-| **Infra** | Self-managed multi-region k3s · eBPF/Cilium · Terraform/Ansible IaC · per-tier PVC storage |
-| **Key innovations** | Warm-sleep hibernation with TCP wake-on-connect; transparent multi-region gateway routing; proactive capacity headroom; real-time console/metrics fan-out across pod replicas |
+| **What** | Multi-tenant game-server hosting platform (Minecraft, Valheim, Terraria, Rust, and more) |
+| **Backend** | Java 21 · Spring Boot 3.4 · 11 Gradle subprojects (9 microservices + gateway + TCP proxy) · two Go services (operator API + control plane) |
+| **Frontend** | Next.js 16 · TypeScript 5 — a macOS-inspired desktop UI for users, plus a separate operator console |
+| **Infra** | Self-managed multi-region k3s · Cilium eBPF (kube-proxy-replacement) · Terraform / Ansible / Packer / cloud-init · Temporal-orchestrated burst autoscaler |
+| **Key innovation** | A four-rung [hibernation idle ladder](docs/hibernation.md) that reclaims idle RAM and resells it — turning a RAM-constrained business into a density play |
+| **Scale** | 6 repositories · 160,000+ lines across application code and Infrastructure-as-Code · multi-node k3s clusters across two live regions |
 
 ---
 
 ## System Architecture
 
+Five planes, separated by responsibility and by Kubernetes namespace. The customer plane serves the user dashboard and APIs; the operator plane is a physically separate console and Go API; the game plane carries raw TCP to game pods; the control plane provisions capacity; and the data + monitoring plane backs all of them.
+
 ```mermaid
 graph TB
     subgraph Internet
-        Player[Game Client TCP]
+        Player[Game Client · TCP]
         Browser[User Browser]
         Operator[Operator Browser]
     end
 
-    subgraph Edge["Edge (Cloudflare → Traefik)"]
-        CF[Cloudflare Tunnels<br/>TLS + WAF]
-        Proxy[platform-proxy :25565<br/>Netty TCP Wake-on-Connect]
+    subgraph Edge["Edge — Cloudflare (zero open ports)"]
+        CF[cloudflared Tunnels<br/>TLS · WAF · anycast]
+        TRAEFIK[Traefik Ingress<br/>cert-manager TLS]
     end
 
-    subgraph UserPlane["User Plane — metrichost.net"]
-        GW[platform-gateway :8080<br/>JWT · Rate Limiting · CORS · RegionRouting · WebSocket]
+    subgraph Customer["Customer Plane (metrichost ns)"]
+        FE[platform-frontend<br/>Next.js 16 desktop UI]
+        GW[platform-gateway :8080<br/>RS256 JWT · tier rate-limit · CORS<br/>STOMP · RegionRoutingFilter]
         AUTH[auth-service :8081]
         SERVER[server-service :8083]
-        USER[user-service :8086]
+        GAMEREG[game-registry :8085]
+        USER[user-service :8086<br/>fleet registry]
         BILLING[billing-service :8087]
         HIBER[hibernation-service :8088]
-        GAMEREG[game-registry :8085]
         NOTIFY[notification-service :8089]
-        FE[platform-frontend :3000]
     end
 
-    subgraph AdminPlane["Operator Plane — metrichost.org"]
-        ADM_FE[platform-admin :3000<br/>Next.js operator console]
-        ADM_API[admin-api :8090<br/>Go · pgx · JWKS · MFA-gated]
+    subgraph Operator["Operator Plane (metrichost-admin-api ns)"]
+        ADM_FE[platform-admin<br/>Next.js operator console]
+        ADM_API[admin-api · Go<br/>dual pgx pools · JWKS · MFA-gated<br/>RBAC · two-person approval]
     end
 
-    subgraph ControlPlane["Control Plane (internal)"]
-        CP[platform-control-plane<br/>Go autoscaler · Temporal workflows<br/>Hetzner provisioner · orphan reconciler]
-        TEMPORAL[Temporal Server]
+    subgraph Game["Game Plane (game-servers ns)"]
+        PROXY[platform-proxy :25565<br/>Netty TCP · wake-on-connect]
+        PODS[Game Pods<br/>region-pinned nodeAffinity]
     end
 
-    subgraph Data["Data Layer"]
-        PG[(PostgreSQL 16<br/>per-svc schemas)]
-        REDIS[(Redis 7<br/>rate limits · sessions · leader election)]
+    subgraph Control["Control Plane (metrichost-system ns)"]
+        CP[platform-control-plane · Go<br/>burst autoscaler · orphan reconciler<br/>headroom controller]
+        TEMPORAL[Temporal Server<br/>+ own PostgreSQL]
+        HCLOUD[(Cloud Provider API<br/>dynamic game nodes)]
+    end
+
+    subgraph DataMon["Data + Monitoring"]
+        PG[(PostgreSQL 16<br/>per-service schemas)]
+        REDIS[(Redis 7<br/>rate limits · leader election)]
         KAFKA[(Redpanda<br/>Kafka events)]
         MINIO[(MinIO<br/>backups · exports)]
+        MON[Prometheus · Grafana<br/>Loki · Alertmanager · blackbox]
     end
 
-    subgraph K8s["Kubernetes (game-servers namespace)"]
-        PODS[Game Pods<br/>2 containers: game-server + ftp-server<br/>PVC-backed · per-tier resource limits]
-        PVC[PersistentVolumeClaims<br/>5Gi → 150Gi by tier]
-    end
-
-    Player --> CF --> Proxy --> PODS
-    Browser --> CF --> GW
-    Operator --> CF --> ADM_FE --> ADM_API
+    Player --> CF --> PROXY --> PODS
+    Browser --> CF --> TRAEFIK --> FE & GW
+    Operator --> CF --> ADM_FE --> GW
 
     GW --> AUTH & SERVER & USER & BILLING & HIBER & GAMEREG & NOTIFY
+    ADM_FE -. rewrites .-> GW
+    GW -. region-routing .-> ADM_API
+    ADM_API --> AUTH
     SERVER --> PODS
-    HIBER --> PODS
-    CP --> TEMPORAL
-    CP -->|provision/destroy Hetzner VMs| K8s
+    HIBER --> PROXY
+    CP --> TEMPORAL --> HCLOUD
+    CP -->|provision / destroy nodes| Game
 
-    AUTH --> PG & REDIS
-    SERVER --> KAFKA & PVC
-    BILLING --> PG
-    USER --> PG
-    ADM_API --> PG
-
-    SERVER --> KAFKA
+    AUTH & USER & BILLING --> PG
+    GW --> REDIS
+    SERVER --> KAFKA & MINIO
     KAFKA --> NOTIFY & USER & BILLING
+    ADM_API --> PG
+    MON -.scrapes.-> Customer & Game & Control
 ```
+
+Each plane is independently deployable and independently failure-isolated. A billing change never restarts a game pod; a compromised game mod cannot reach the platform namespace; the operator console runs at a separate domain behind separate namespacing.
 
 ---
 
 ## The Problem
 
-Existing game hosting panels (Pterodactyl, AMP) are monoliths. They run everything in one process, can't scale individual components, have no concept of resource-aware scheduling, and treat server hibernation as an afterthought.
+Existing game-hosting panels (Pterodactyl, AMP) are monoliths. They run everything in one process, cannot scale individual components, have no concept of resource-aware scheduling, and treat hibernation as an afterthought.
 
-When you're running hundreds of game servers across multiple games, you need infrastructure that handles:
+Running hundreds of game servers across multiple game types demands infrastructure that handles:
 
-- **Resource isolation** — one abusive Minecraft server shouldn't affect a Valheim server
-- **Cost efficiency** — idle servers should release compute, not burn CPU at 0 players
-- **Instant resume** — a player connecting to a sleeping server shouldn't notice the wake-up
-- **Tenant fairness** — free users shouldn't degrade performance for paying users
-- **Operational safety** — deploying a billing fix shouldn't restart game servers
-- **Geographic reach** — players in the US shouldn't route through European infrastructure
+- **Resource isolation** — one abusive Minecraft server must not affect a Valheim server.
+- **Cost efficiency** — idle servers should release compute and memory, not hold RAM at zero players.
+- **Instant resume** — a player connecting to a sleeping server should never see "offline."
+- **Tenant fairness** — free users must not degrade performance for paying users.
+- **Operational safety** — deploying a billing fix must not restart game servers.
+- **Geographic reach** — US players should not route through European infrastructure for console, RCON, or file operations.
 
 ## How MetricHost Addresses This
 
 | Concern | Typical Panel (Pterodactyl) | MetricHost |
-|---------|---------------------------|-----------|
-| Architecture | Monolith (Laravel + Wings) | 10+ independently deployable microservices + 2 Go services |
-| Game servers | Docker containers, single node | K8s pods with per-tier CPU/memory limits + PVC storage |
-| Capacity scaling | Manual server addition | Temporal-orchestrated burst provisioning from cloud API |
-| Hibernation | None — servers run 24/7 | Warm-sleep + wake-on-connect (sub-1s for paid tiers) |
+|---|---|---|
+| Architecture | Monolith (Laravel + Wings) | 9 Spring Boot microservices + gateway + TCP proxy + 2 Go services |
+| Game servers | Docker containers, single node | K8s pods, per-tier CPU/memory limits, region-pinned scheduling |
+| Capacity scaling | Manual server addition | Temporal-orchestrated burst provisioning against a cloud API |
+| Hibernation | None — servers run 24/7 | Four-rung idle ladder: WARM → SOFT_FROZEN → DEEP_FROZEN → STOPPED |
 | Rate limiting | Global fixed limits | Tier-aware, Redis-bucketed per subscription level |
-| Abuse detection | Manual admin intervention | Automated CPU abuse detection + IP tracking |
-| Deploys | Full downtime redeploy | Selective — only changed services restart |
-| Cross-service comms | Shared database queries | Async Kafka events (decoupled lifecycles) |
-| Multi-region | Single location | Active US + EU regions with transparent gateway routing |
-| Operator plane | Same UI as users | Separate domain, Go API, MFA-gated read-write access |
+| Abuse detection | Manual admin intervention | Automated CPU-abuse detection, IP tracking, connection-bombing defense |
+| Deploys | Full-downtime redeploy | Selective — only changed services restart |
+| Cross-service comms | Shared database queries | Async Kafka events on Redpanda (decoupled lifecycles) |
+| Multi-region | Single location | Region-direct data planes; transparent gateway routing from a global fleet registry |
+| Operator plane | Same UI as users | Separate domain, Go read-only API, RBAC, MFA-gated, two-person approval |
 
 ---
 
-## Platform & Infrastructure Engineering
+## Platform Engineering
 
-Beyond the application, I built and operate the platform it runs on — the layer most "I shipped a SaaS" projects never touch.
+Beyond the application, I built and operate the platform it runs on — the layer most "I shipped a SaaS" projects never touch. Full depth in [docs/infrastructure.md](docs/infrastructure.md).
 
-### Infrastructure-as-Code, End to End
-
-Terraform (Hetzner Cloud provisioning) + Ansible (OS hardening, k3s join, firewall rules) + Packer (golden VM images) + cloud-init. Servers are cattle, not pets — a new control-plane node can be reprovisioned to a known state from scratch. Staging and production environments are independently managed overlays over the same Terraform modules.
-
-### CNI Migration: flannel → Cilium (eBPF)
-
-Migrated the live cluster's network data plane from flannel to Cilium with `kubeProxyReplacement=true`. This replaced kube-proxy's iptables chains with eBPF programs in the kernel — lower latency, per-pod identity-based `CiliumNetworkPolicy`, and proper `hostPort` binding via BPF tc/XDP (which flannel's svclb approach was dropping for Traefik ingress). Validated the full cutover — including the non-obvious gotcha that BPF programs on the public NIC intercept SSH/apiserver traffic on single-NIC VMs — on disposable throwaway clusters before touching production.
-
-### Multi-Region Federation
-
-The platform runs active clusters in Europe (Hetzner Nuremberg) and the US (Hetzner Hillsboro). The architecture separates concerns cleanly:
-
-- **Global plane (EU)**: auth, billing, user profiles, fleet registry, server CREATE — one canonical truth
-- **Regional data planes**: per-region Postgres + Redpanda + platform-gateway + game-cloud workers. Each region owns its own game server records and event bus
-- **Transparent routing**: the EU gateway's `RegionRoutingFilter` resolves a request's target region from a global `server_directory` index (cached, 60s TTL) and forwards transparently — the frontend makes same-origin calls, the gateway routes to the correct regional cluster
-- **Regional pods**: game pods carry a `topology.kubernetes.io/region` hard `requiredDuringSchedulingIgnoredDuringExecution` nodeAffinity — a pod for a US server physically cannot schedule onto a EU node
-
-### Burst Autoscaler
-
-A Go service (platform-control-plane) watches the `game-servers` namespace and orchestrates capacity on demand. Key design elements:
-
-- **Durable provisioning workflows** via Temporal — each burst worker goes through a multi-step workflow: Hetzner VPS creation → cloud-init wait → WaitForNodeReady (k3s auto-join) → Ansible hardening → `FinalizeWorkerReady` DB record. Temporal's durable execution means a workflow survives pod restarts mid-provision.
-- **Reactive scaling**: when pending game pods exceed free capacity, `EvaluateScaleUp` triggers provisioning. Burst workers are cloud VMs that join the k3s cluster, run game pods, and are destroyed when demand drops.
-- **Proactive headroom**: `EvaluateHeadroom` maintains a configurable minimum of "free validated workers" per region — workers that are Ready, schedulable, have a private IP, no uninitialized taint, and zero game pods. Headroom workers absorb demand spikes without waiting for a provision cycle.
-- **Orphan reconciliation**: a 5-minute reconciliation loop detects Hetzner VMs or k3s nodes that aren't in the control-plane's DB (leaked during failed provisions). Grace periods (15 min) prevent the reconciler from deleting workers that are mid-join — a timing hazard that caused a live deadlock (new node joins, reconciler classifies it as OrphanK8sNoRecord, deletes it, autoscaler sees in-flight provision and refuses to retry, game pod stuck Pending).
-- **Scaledown floor**: scaledown logic respects the headroom minimum — draining never takes a region below its configured free-worker floor.
-- **Safety rails**: CloudHourly budget cap, `MaxParallelProvisions`, cooldown tracking, per-region in-flight dedup, dry-run mode.
-
-### Persistent Game Storage
-
-Game servers use PersistentVolumeClaims backed by Hetzner's CSI driver (`hetzner-volume-game`) in production and `local-path-game` (Rancher's local path provisioner) in staging/dev. Storage sizes are tier-gated: FREE=5 Gi, STARTER=10 Gi, PLUS=25 Gi, PRO=50 Gi, ULTRA=150 Gi.
-
-This replaced an earlier emptyDir + MinIO periodic sync approach. With PVCs: pod restarts and hibernation leave data intact, the volume follows the pod spec (`WaitForFirstConsumer` binding), and MinIO is demoted to backup/export only. Server deletion is a soft-delete with 7-day PVC retention before the purge sweep runs.
-
-### Observability & Alerting
-
-Prometheus + Grafana + Loki + Alertmanager + blackbox probes running in a dedicated monitoring namespace. Alertmanager rules cover k3s-embedded control-plane components (suppressed appropriately — k3s embeds these), CPU throttling (info-level), and custom platform metrics like `metrichost_controlplane_free_validated_workers{region}` and `RegionBelowHeadroom`. HPA drives horizontal pod autoscaling on platform services via metrics-server.
-
-### Edge & Networking
-
-Cloudflare Tunnels for zero-open-port ingress and SSH (`cloudflared`) — no inbound ports on any node. Traefik handles TLS termination and routing inside the cluster. cert-manager automates Let's Encrypt certificates. `CiliumNetworkPolicy` enforces namespace isolation between the `metrichost` (platform services), `game-servers`, `metrichost-admin-api`, and `metrichost-system` (control-plane + Temporal) namespaces — a compromised game server mod cannot reach the billing database.
-
-### Disaster Recovery
-
-Automated, encrypted, off-site PostgreSQL backups with verified restores. A backup that silently produces an empty file is caught before it's trusted — the restore verification step is not optional. Zero-day retention gap is a design constraint, not an afterthought.
+- **Infrastructure-as-Code, end to end.** Terraform provisions cloud VMs, networks, firewalls, SSH keypairs, and load balancers with remote state and per-region, count-gated modules. Ansible hardens every node (SSH config, fail2ban, unattended-upgrades, firewall, kernel params, system limits). Packer builds a pre-hardened golden image so burst workers skip live hardening on first boot. cloud-init handles per-node bootstrap: k3s join, deterministic hostname pinning for fleet reconciliation, and NodeSwap configuration on game nodes.
+- **Self-managed multi-region k3s.** An EU production cluster (control-plane node + three infra workers carrying Redpanda and Temporal) plus an independent single-node staging cluster, and a live US-West regional cluster carrying the regional data plane only. A US-East region is provisioned in Terraform but count-gated to zero pending cloud-provider capacity. Clusters are separated by non-overlapping CIDR ranges.
+- **Cilium eBPF CNI.** Migrated the network data plane from flannel to Cilium with `kubeProxyReplacement=true`, removing kube-proxy entirely. Identity-based `CiliumNetworkPolicy` governs namespace and pod isolation. The full cutover was validated on disposable throwaway clusters before touching production; stale flannel interfaces were cleaned post-migration.
+- **Temporal-driven burst autoscaler.** A Go control plane provisions game nodes on demand through durable Temporal workflows (create node → cloud-init → k3s join → Ansible harden → Ready), with a proactive headroom controller keeping at least one validated worker pre-warmed and an orphan reconciler that only ever deletes control-plane-owned nodes (`metrichost.net/managed-by=controlplane`).
+- **Two-tier game node fleet.** A static, Terraform-managed warm baseline worker (always Ready, no cold-burst delay) plus on-demand burst workers. Ownership labels (`metrichost.net/managed-by=terraform` vs `metrichost.net/managed-by=controlplane`) keep the reconciler from ever touching the static baseline.
+- **Encrypted off-site DR backups.** PostgreSQL backups are encrypted and shipped off-site, fail-closed: an empty-file backup is detected and alerted rather than silently trusted.
+- **Observability per cluster.** Prometheus, Grafana, Loki, Alertmanager, and blackbox probes run independently in each cluster's `monitoring` namespace. HPA drives horizontal scaling on stateless platform services via metrics-server.
+- **Zero-open-port edge.** Cloudflare fronts everything via cloudflared tunnels (no inbound ports on any node), with TLS, WAF, and per-region API subdomains (`api-{region}.example.tld`). Traefik terminates ingress inside each cluster; cert-manager automates certificates.
 
 ---
 
 ## Deep Dives
 
+### Hibernation: The Idle Ladder
+
+The platform's core economic differentiator. Idle game servers hold RAM they aren't using, and held RAM is unsold margin. MetricHost descends a four-rung idle ladder — **WARM → SOFT_FROZEN → DEEP_FROZEN → STOPPED** — reclaiming progressively more memory the longer a server stays idle, while keeping wake latency low enough that players never see "offline."
+
+```
+ACTIVE ─t1─▶ WARM ─t2─▶ SOFT_FROZEN ─t3─▶ DEEP_FROZEN ─t4─▶ STOPPED
+full CPU+RAM   CPU 100m    cold RAM paged     process frozen     pod deleted
+               RAM resident to NVMe (swap)    to NVMe            cold start
+<1s wake       <1s wake    ~1-5s wake         ~1-5s restore      30-60s
+```
+
+The state machine is implemented across two enums: `HibernationState` (hibernation lifecycle: `ACTIVE`, `IDLE`, `WARM`, `SOFT_FROZEN`, `DEEP_FROZEN`, `HIBERNATING`, `HIBERNATED`, `WAKING`) and `ServerStatus` (server lifecycle: `STARTING`, `ACTIVE`, `STOPPED`, `WARM`, etc.). `IdleHibernationSweeper` drives the escalation ladder between hibernation states.
+
+SOFT_FROZEN (shipped to production 2026-06-17) uses Kubernetes NodeSwap on cgroup-v2 game nodes: the `swap-reclaim` DaemonSet (in `kube-system`) reads the `metrichost.net/swap-eligible=true` annotation added by `KubernetesOrchestrator.softFreeze()` and sets the game container's `memory.swap.max` and `memory.high` via cgroup v2 directly — because Kubernetes exposes no declarative API for these knobs. This frees idle heap to NVMe swap while the process stays alive; the annotation is removed on wake and the agent restores `memory.high=max` (page-in). The idle RAM is reclaimed and visible to the cluster scheduler for new pods.
+
+Per-game-type profiles in `GameImage` (fields: `warm_after_min`, `soft_freeze_after_min`, `deep_freeze_after_min`, `stop_after_min`, `deepMechanism`) tune the timing and escalation path for each game's RAM footprint and wake tolerance. DEEP_FROZEN currently uses a FAST_RESTART mechanism (graceful stop with state preserved); full CRaC (Java) and CRIU (native games) checkpointing to NVMe is on the roadmap.
+
+**Full architecture including the Always-On cost basis and the DEEP_FROZEN roadmap → [docs/hibernation.md](docs/hibernation.md).**
+
 ### Cold Start → Server Wake Flow
 
-The most complex user-plane subsystem and the platform's core differentiator. A player connects to a sleeping server; the infrastructure intercepts, wakes the specific Kubernetes pod, and forwards the buffered TCP context seamlessly.
+A player connects to a sleeping server; the infrastructure intercepts the TCP connection, wakes the specific Kubernetes pod, and forwards the buffered bytes seamlessly. The player sees "waking…", never "offline."
 
 ```mermaid
 sequenceDiagram
-    actor Player as Minecraft Client
-    participant Proxy as Netty GameProxyServer
-    participant Hiber as HibernationService
-    participant Kafka as Redpanda Event Bus
-    participant Srv as ServerService
+    actor Player as Game Client
+    participant Proxy as platform-proxy (Netty)
+    participant Hiber as hibernation-service
+    participant Kafka as Redpanda
+    participant Srv as server-service
     participant K8s as Kubernetes API
 
     Player->>Proxy: TCP SYN (:25565)
 
     rect rgb(60, 20, 20)
-        Note over Proxy: Edge Defense Perimeter
-        Proxy->>Proxy: Enforce PROXY_MAX_CONNECTIONS_PER_IP
-        Proxy->>Proxy: Assert IdleStateHandler read/write limits
+        Note over Proxy: Edge defense perimeter
+        Proxy->>Proxy: PROXY_MAX_CONNECTIONS_PER_IP / _PER_SERVER
+        Proxy->>Proxy: IdleStateHandler read/write timeouts
     end
 
-    Proxy->>Hiber: Check Server State (REST API)
+    Proxy->>Hiber: wakeOnConnect() — check state
 
-    alt State == HIBERNATED / WARM
-        Hiber-->>Proxy: HTTP 200 (State: WARM)
-        Proxy->>Proxy: Buffer TCP connection bytes
+    alt State == WARM / SOFT_FROZEN
+        Hiber-->>Proxy: state is idle
+        Proxy->>Proxy: Buffer TCP bytes (ConcurrentHashMap)
 
         rect rgb(20, 20, 50)
-            Note over Hiber,K8s: Asynchronous Kubernetes Orchestration
+            Note over Hiber,K8s: Asynchronous orchestration
             Hiber->>Kafka: Publish WAKE_REQUEST
             Kafka-->>Srv: Consume WAKE_REQUEST
-            Srv->>K8s: Wake Pod (docker-unpause / scale 0→1)
+            Srv->>K8s: CPU restore (WARM) / annotation remove + CPU restore (SOFT_FROZEN)
         end
 
-        K8s-->>Srv: Readiness Probe Passes
+        K8s-->>Srv: Readiness probe passes
         Srv->>Kafka: Publish STATUS_CHANGED (ACTIVE)
-        Kafka-->>Hiber: Consume ACTIVE Status
-
-        Hiber-->>Proxy: Notify proxy (internal signal)
-        Proxy->>K8s: Flush buffered TCP bytes to Pod IP
-        K8s-->>Player: Seamless TCP connection established
+        Kafka-->>Hiber: Consume ACTIVE
+        Hiber-->>Proxy: Server ready (internal signal)
+        Proxy->>PODS: Flush buffered bytes to pod
+        PODS-->>Player: Seamless connection
 
     else State == ACTIVE
-        Hiber-->>Proxy: HTTP 200 (State: ACTIVE)
-        Proxy->>K8s: Forward TCP immediately
+        Hiber-->>Proxy: already active
+        Proxy->>PODS: Forward immediately
     end
 ```
 
-**Warm sleep** (paid tiers): `HibernationService` issues a Docker container pause against the game pod via the Kubernetes exec API, preserving RAM state. Wake times are sub-1 second, tracked by `PlatformMetrics`. **Cold boot** (free tier): state is persisted to MinIO, the container is destroyed — ~30–60s wake.
+### Multi-Region Federation
 
-`GameProxyServer` is a custom **Netty TCP proxy** using `NioEventLoopGroup`. Connections for hibernated servers go into a `ConcurrentHashMap` buffer. When the pod is Ready, Netty flushes the buffered bytes to the fresh pod — the player's client sees a normal connection.
+The federation design is **region-direct, not proxy-through-EU**. Per-server data-plane operations — console WebSocket, RCON, file manager, lifecycle — go directly to the owning regional cluster rather than tunneling through Europe. The frontend reads a global fleet registry to discover each server's region, then routes to `api-{region}.example.tld` over Cloudflare anycast.
 
----
+A global control plane (EU) owns auth, billing, the fleet registry, and server CREATE. Each region owns its own data plane: gateway, server-service, hibernation, game-registry, platform-proxy, regional PostgreSQL, and regional Redpanda. On the EU gateway, `RegionRoutingFilter` (order 10002, after `RouteToRequestUrlFilter`) resolves the owning region from the server UUID via the fleet directory and transparently rewrites `GATEWAY_REQUEST_URL_ATTR`. It matches routes whose ID matches `server-(service|backups)` and reads the pre-StripPrefix original path from `GATEWAY_ORIGINAL_REQUEST_URL_ATTR` to avoid the rewritten path reaching the regional gateway incorrectly.
+
+**Full architecture, including the dual-write fleet-registry solution and the cross-region Kafka problem → [docs/federation.md](docs/federation.md).**
+
+### Operator Control Plane
+
+The operator console is a physically separate plane: a Next.js operator frontend (`platform-admin`) served at an operator subdomain, backed by a Go REST API (`admin-api`) running in its own `metrichost-admin-api` namespace. It is built for least privilege and accountability rather than convenience.
+
+- **Read-only by default, two pgx pools.** `admin_api_ro` is SELECT-only across the platform schemas. `admin_api_rw` can write to exactly two tables: `auth.user_roles` and `audit.admin_actions`. There is no general-purpose write path into platform data.
+- **RBAC: 5 roles × 11 scopes.** Roles: `READ_ONLY`, `SUPPORT`, `BILLING_OPS`, `ADMIN`, `SUPER_ADMIN`. Scopes include `audit:read`, `user:read/write`, `billing:read/write`, `server:read/write`, `impersonate`, `roles:write`, `ops:write`. Every endpoint is scope-gated; `ops:write` (Temporal workflow triggers) is restricted to `SUPER_ADMIN` only.
+- **Two-person approval for high-risk ops.** Impersonation and refunds require one admin to initiate and a *different* admin to approve — self-approval is blocked at the handler level. Requests expire after 15 minutes (`ApprovalTTL = 15 * time.Minute`).
+- **MFA freshness on every mutation.** Each non-GET request requires a fresh TOTP claim; stale-MFA tokens are rejected fail-closed. Auth is JWT validated against the auth-service JWKS endpoint.
+- **Audit trail.** Every operator mutation is written to `audit.admin_actions`.
+- **Network isolation.** `CiliumNetworkPolicy` lets admin-api reach auth-service (JWKS) and server-service (M2M SSE metrics) only; it has no path to the game-servers namespace.
+
+### Burst Worker Autoscaler
+
+Capacity is provisioned by `platform-control-plane`, a Go service whose burst-worker lifecycle is a **durable Temporal workflow**, not a bare goroutine. Activities run in sequence: `CreateHetznerServer` → `RecordWorkerCreated` → `WaitForCloudInit` (polls a bootstrap marker via SSH to the private IP with host key pinned in known_hosts) → `WaitForNodeReady` → `RunAnsibleHardening` → finalize. Each step has a `StartToClose` timeout and Temporal-managed retries. If cloud-init fails (intermittent upstream bug; ~30% of provisions), the VM is destroyed and a fresh one is created, up to `maxProvisionAttempts = 3`. If any step fails after node creation, a `Compensate()` call (`DestroyHetznerServer`) prevents cloud resource leaks.
+
+The fleet is two-tier: a static, Terraform-managed warm baseline (always Ready) plus on-demand burst workers. The orphan reconciler skips nodes whose `metrichost.net/managed-by` label is not `controlplane` — Terraform-managed workers never appear in orphan candidates.
+
+> **A real production bug, fixed:** A Temporal activity that accepted a Go `error` interface as a parameter failed to deserialize on Temporal's side — JSON cannot round-trip an `error` interface — so the activity panicked, retried three times, and gave up without marking the workflow failed. The `workflow_operations` row stayed `status=running`, a phantom `in_flight=1` blocked all new provision requests, and game pods stuck Pending. The fix: extract `.Error()` string before `ExecuteActivity`; never pass interface types as Temporal activity arguments.
+
+**Full depth → [docs/infrastructure.md](docs/infrastructure.md).**
 
 ### Request Lifecycle
 
@@ -259,9 +272,9 @@ Every API request traverses this pipeline:
 
 ```mermaid
 flowchart LR
-    subgraph Gateway Pipeline
+    subgraph Gateway["Gateway pipeline"]
         A[CORS validation] --> B[Rate limit<br/>tier-aware]
-        B --> C[JWT validation<br/>HS256 pinned]
+        B --> C[JWT validation<br/>RS256 / JWKS]
         C --> D[RegionRouting<br/>fleet directory lookup]
         D --> E[Route to service]
     end
@@ -269,153 +282,22 @@ flowchart LR
     B -.->|tier buckets| R[(Redis)]
     D -.->|60s TTL cache| FD[(fleet.server_directory)]
 
-    subgraph Target Service
+    subgraph Target["Target service"]
         F[Owner-ID validation<br/>fail-closed] --> G[Business logic]
         G --> H[Emit Kafka event]
         H --> I[Return response]
     end
 
     E --> F
-
     style R fill:#f85149,color:#fff
     style FD fill:#58a6ff,color:#fff
 ```
 
-Rate limiting isn't just "10 requests per second." Each subscription tier gets its own Redis bucket namespace (FREE: 10 req/s, STD: 30 req/s, PRO: 100 req/s). A flood of free-tier requests never exhausts the capacity available to paying customers.
-
-Every resource access is fail-closed: the target service validates that the JWT's owner-ID matches the requested resource before any business logic executes (BOLA/IDOR prevention). No ownership match → 403, no exceptions.
-
----
-
-### Multi-Region Routing
-
-The EU gateway acts as a transparent regional proxy for the entire `/servers` data plane, without requiring the frontend to know about regional topology.
-
-```mermaid
-flowchart TD
-    Client[Browser / Mobile] -->|same-origin request<br/>/servers/{uuid}/...| EU[EU Gateway<br/>metrichost.net]
-
-    EU -->|RegionRoutingFilter order=10002| RR{Region<br/>Resolution}
-
-    RR -->|POST /servers: read body.region| LOCAL[EU Data Plane<br/>server-service]
-    RR -->|GET /servers/{uuid}: fleet dir lookup<br/>60s TTL cache| FD[(fleet.server_directory<br/>EU Postgres)]
-
-    FD -->|region=eu| LOCAL
-    FD -->|region=hil| HIL[US-West Gateway<br/>api-hil.metrichost.net]
-    FD -->|unknown: fail-safe| LOCAL
-
-    LOCAL -->|serve response| Client
-    HIL -->|forward, re-execute StripPrefix| UW[HIL Data Plane<br/>server-service]
-    UW -->|serve response| Client
-```
-
-The `RegionRoutingFilter` resolves region from a global `fleet.server_directory` maintained in the EU user-service. The directory is populated via a dual-path registration strategy: a Kafka consumer on the local event bus (for EU servers) and a direct internal HTTP call to the EU user-service (for regional clusters where Kafka doesn't cross regions).
-
-All `/servers/**` operations — lifecycle, file manager, console history, RCON, backups, analytics, scheduled tasks — are transparently region-routed by a single filter. The frontend makes same-origin calls to `metrichost.net`; routing is entirely invisible to it.
-
----
-
-### Real-Time Console & Metrics Streaming
-
-Server console output and live metrics stream to the browser over WebSocket/STOMP, traversing Cloudflare → Traefik → platform-gateway → server-service pods.
-
-**The leader-pod broker problem.** `server-service` runs as 2 replicas. `MetricsPushService` elects one Redis leader pod to poll each game pod's metrics every 3 seconds and publishes frames to Spring's in-process `SimpleBroker`. With sticky WebSocket upgrades, a browser connected to the *non-leader* pod never receives a metrics frame — the leader's broker has no way to reach the other pod's subscribers.
-
-Console output had already solved this via a Kafka fan-out relay (`ConsoleStreamEnvelope` on the `console.stream` topic, per-pod consumer group). Metrics had no equivalent.
-
-**Fix.** A `MetricsStreamEnvelope` → `metrics.stream` Kafka topic → `MetricsRelayConsumer` (per-pod consumer group). Each pod consumes from Kafka and pushes to its own local broker, so every connected subscriber receives frames regardless of which replica is the metrics leader.
-
-**Keepalive timing.** `sendStreamKeepalives` previously ran on a 14-second scheduler with a 15-second client threshold — worst-case gap of 28 seconds, exceeding the frontend's `HEARTBEAT_TIMEOUT_MS=20s`. An idle server triggered a reconnect loop. Fixed: 7-second scheduler + 8-second threshold (worst-case ~15s, well under the timeout).
-
----
-
-### Burst Autoscaler Internals
-
-The control-plane's provisioning workflow is a Temporal activity chain designed to be restartable at any step:
-
-```mermaid
-sequenceDiagram
-    participant AutoS as Autoscaler (Go)
-    participant Temp as Temporal Workflow
-    participant Hetz as Hetzner API
-    participant K8s as k3s Cluster
-    participant Ans as Ansible Hardening
-
-    AutoS->>AutoS: EvaluateScaleUp: pending pods > free workers
-    AutoS->>Temp: StartWorkflow(provision-eu-<epoch>-<ordinal>)
-
-    Temp->>Hetz: CreateServer(type, location, cloud-init)
-    Hetz-->>Temp: VM ID + private IP
-    Temp->>Temp: WaitForCloudInit (~2 min)
-    Note over K8s: VM runs k3s agent, auto-joins cluster
-    Temp->>K8s: WaitForNodeReady: poll until node=Ready (~5 min)
-    Temp->>Ans: RunAnsibleHardening (~6 min)
-    Temp->>Temp: FinalizeWorkerReady: write DB record + clear uninitialized taint
-
-    Note over AutoS: Node now visible as free_validated_worker
-    AutoS->>AutoS: EvaluateScaleDown: idle workers drain + destroy
-```
-
-**Orphan grace period (critical correctness).** The orphan reconciler runs every 5 minutes and destroys k3s nodes with no DB record. Between `WaitForNodeReady` and `FinalizeWorkerReady`, the node has joined the cluster but has no DB record yet — a ~11-minute window. Without a grace period, the reconciler classifies the just-joined node as an orphan and deletes it, the provision workflow loses its node, and the autoscaler's in-flight dedup prevents a retry → game pods stuck Pending indefinitely. The fix: a 15-minute `recentlyJoinedK8sNodeGracePeriod` skip in the orphan detector, matching the pre-existing grace period for the Hetzner-side orphan path.
-
----
-
-### Persistent Game Storage Architecture
-
-```mermaid
-flowchart LR
-    subgraph GamePod["Game Pod (game-servers ns)"]
-        GS[game-server container]
-        FTP[ftp-server container]
-    end
-
-    PVC[PersistentVolumeClaim<br/>server-{uuid}<br/>WaitForFirstConsumer] -->|/data mount| GS
-    PVC -->|/data mount| FTP
-
-    subgraph SC["StorageClass"]
-        SC_PROD[hetzner-volume-game<br/>csi.hetzner.cloud<br/>Retain]
-        SC_DEV[local-path-game<br/>rancher.io/local-path<br/>Retain]
-    end
-
-    PVC --> SC_PROD
-    PVC -.->|staging/dev| SC_DEV
-
-    subgraph Lifecycle
-        START[Server Start] -->|PVC exists → mount| GamePod
-        STOP[Server Stop] -->|Pod deleted, PVC persists| PVC
-        DELETE[Server Delete] -->|soft-delete, 7-day retention| PURGE[Purge Sweep every 5min]
-        PURGE -->|hard-delete DB + PVC + MinIO backup| DONE[Gone]
-    end
-
-    MINIO[(MinIO<br/>backups · exports only)]
-    GS -->|scheduled backups| MINIO
-```
-
-`reclaimPolicy: Retain` on both storage classes means a PVC survives pod deletion — hibernating or stopping a server never risks data loss. The volume only follows the pod (via `WaitForFirstConsumer` topology binding), ensuring scheduling locality on the same node.
-
----
-
-### Why Kubernetes (Not Just Docker)
-
-Docker Compose works for 5 game servers. It doesn't handle:
-
-| Problem | Docker Compose | Kubernetes |
-|---------|---------------|-----------|
-| Scale to 0 (hibernation) | Can't scale replicas | `kubectl scale --replicas=0` natively |
-| Per-user resource limits | Manual cgroup config | `resources.limits` per pod spec |
-| Rolling restarts | Kill + recreate (downtime) | Zero-downtime rollout |
-| Namespace isolation | Flat network | `game-servers` namespace isolated from platform services |
-| Service discovery | Manual DNS | Built-in: `billing-service.metrichost.svc` |
-| Persistent volumes | Volume mounts, manual cleanup | PVC lifecycle with retention policies |
-| Regional affinity | Not possible | `nodeAffinity` on `topology.kubernetes.io/region` |
-
-Game server pods run in the `game-servers` namespace. Platform services run in `metrichost`. Control-plane workloads run in `metrichost-system`. Network policies enforce isolation between all namespaces.
-
----
+JWTs are RS256, signed by auth-service using a private key (`JWT_RSA_PRIVATE_KEY`); the gateway fetches the matching public key from the JWKS endpoint (`/.well-known/jwks.json`) with a 5-minute TTL cache and supports `kid`-based key rotation. The algorithm is pinned — `alg=none` and `alg=HS256` tokens are rejected by the `RsaJwtVerifier`. Rate limiting runs in tier-bucketed Redis namespaces so a free-tier flood cannot exhaust paid capacity. Every resource access is fail-closed: the target service asserts that the authenticated `userId` matches the resource `ownerId` before any business logic runs (BOLA/IDOR prevention).
 
 ### Event-Driven Architecture
 
-Services don't call each other synchronously for side effects. Everything propagates through typed Kafka events on Redpanda:
+Services do not call each other synchronously for side effects. Everything propagates through typed Kafka events on Redpanda.
 
 ```mermaid
 flowchart TD
@@ -425,56 +307,40 @@ flowchart TD
         BILL[billing-service]
     end
 
-    BUS[Redpanda — Kafka-compatible]
+    BUS[(Redpanda — Kafka-compatible)]
 
     subgraph Consumers
-        NOTIFY[notification-service<br/>transactional emails]
+        NOTIFY[notification-service<br/>transactional email]
+        USER[user-service<br/>profiles · fleet directory · GDPR]
         BILL2[billing-service<br/>quota enforcement]
-        USER[user-service<br/>profiles + fleet directory]
         SRV2[server-service<br/>limit updates]
     end
 
-    AUTH -->|USER_REGISTERED<br/>USER_DELETED| BUS
-    SRV -->|SERVER_CREATED<br/>SERVER_DELETED<br/>STATUS_CHANGED| BUS
+    AUTH -->|USER_REGISTERED · USER_DELETED| BUS
+    SRV -->|SERVER_CREATED · SERVER_DELETED · STATUS_CHANGED| BUS
     BILL -->|SUBSCRIPTION_CHANGED| BUS
 
-    BUS --> NOTIFY
-    BUS --> BILL2
-    BUS --> USER
-    BUS --> SRV2
-
+    BUS --> NOTIFY & USER & BILL2 & SRV2
     style BUS fill:#d29922,color:#fff
 ```
 
-`USER_DELETED` triggers cascading deletion across all services — GDPR Right to Erasure — without any service knowing about the others. If `notification-service` goes down, users still register; the welcome email processes when it recovers.
+`USER_DELETED` triggers cascading deletion across every service — GDPR Right to Erasure — without any service needing to know about the others.
 
----
+> **Cross-region note:** regional Redpanda is independent per cluster, so a `SERVER_CREATED` event emitted in a regional cluster does not reach the EU bus where the fleet registry consumes. Regional clusters therefore also write the fleet directory via a direct HTTP call to the global user-service at create/lifecycle/delete time. See [docs/federation.md](docs/federation.md).
 
-### CI/CD Pipeline
+### Real-Time Streaming (Console + Metrics)
 
-```mermaid
-flowchart LR
-    A[Skip Guard] --> B[Validate<br/>tests + lint]
-    B --> C[Detect Changes<br/>git diff]
-    C --> D[Build<br/>matrix — parallel]
-    D --> E[Deploy<br/>selective]
-    E --> F[Verify<br/>health + route probes]
+Console output and live metrics stream to the browser over WebSocket/STOMP, traversing Cloudflare → Traefik → platform-gateway → server-service pods.
 
-    style D fill:#58a6ff,color:#fff
-    style E fill:#bc8cff,color:#fff
-```
+**The leader-pod broker problem.** `server-service` runs multiple replicas. A single Redis-elected leader polls each pod's metrics every 3 seconds and broadcasts frames to Spring's in-process `SimpleBroker`. With sticky WebSocket upgrades, a browser connected to a non-leader replica never receives a metrics frame — the leader's broker has no path to another replica's subscribers. The "stats never display" bug was exactly this.
 
-Each of the 5 repositories self-owns its deployment manifests and CI/CD workflow (GitHub Actions).
+**The fan-out fix (applied to both streams).** Each frame is published as an envelope to a Kafka topic: `ConsoleStreamEnvelope` to `console.stream` (6 partitions) and `MetricsStreamEnvelope` to `metrics.stream`, each with a **unique consumer group per pod** (`${console.relay.group-id}` / `${metrics.relay.group-id}`). Every replica's relay consumer (`ConsoleStreamRelayConsumer`, `MetricsRelayConsumer`) picks up the frame and delivers it to its own local STOMP subscribers. Console had this pattern first; metrics was retrofitted to match (PR #181).
 
-- **Matrix builds** — each changed service builds on its own runner in parallel
-- **SSH pipe streaming** — `docker save | ssh | ctr import` — no tarball intermediary
-- **Selective restarts** — only the K8s Deployment for a changed service rolls. A billing fix never bounces a game server pod
-- **Environment-aware overlays** — Kustomize overlays (`deploy/overlays/production`, `deploy/overlays/staging`) gate environment-specific hardening. The CI pipeline selects the overlay by `KUSTOMIZE_PATH` env var
-- **Readiness verification** — post-deploy health checks and route probes before marking the workflow run successful
+**Keepalive arithmetic.** `STREAM_KEEPALIVE_INTERVAL_MS = 8_000` (idle threshold) + `KEEPALIVE_SCHEDULER_INTERVAL_MS = 7_000` (scheduler frequency) = worst-case 15-second gap, safely under the frontend's `HEARTBEAT_TIMEOUT_MS = 20_000`.
 
----
+**Root-cause isolation.** A four-hop Python STOMP-over-WS probe proved that neither Cloudflare nor Traefik drops STOMP frames — both bugs were purely in server-service, not the edge.
 
-### Contract Testing
+### Contract-Tested API Boundaries
 
 Frontend and backend can never silently drift:
 
@@ -489,102 +355,117 @@ flowchart TD
 
 If an endpoint changes shape, the frontend build fails before any deployment happens.
 
+### CI/CD Pipeline
+
+```mermaid
+flowchart LR
+    A[Skip Guard] --> B[Validate<br/>tests · lint · gitleaks]
+    B --> C[Detect Changes<br/>git diff vs deployed]
+    C --> D[Build<br/>matrix · parallel]
+    D --> E[Deploy<br/>selective rollout]
+    E --> F[Verify<br/>readiness + route probes]
+    style D fill:#58a6ff,color:#fff
+    style E fill:#bc8cff,color:#fff
+```
+
+Each of the six repositories owns an independent CI pipeline. A **skip guard** drops no-op runs. **Validate** runs tests (Testcontainers integration for backend, Vitest for frontend, `go test -race` for Go), a gitleaks secret scan, and type/lint checks. **Detect** diffs against the last deployed commit to identify changed Gradle subprojects or services, so only changed services build. **Build** ships Docker images by SSH pipe (`docker save | ssh | ctr import`) — no tarball round-trip, no registry hop for large images, with BuildKit cache. **Deploy** restarts only the changed Deployments — a billing fix never bounces a game pod. **Verify** runs post-deploy readiness and route health checks before marking the run successful.
+
 ---
 
-## Services
+## Microservices
 
-### User-Facing Microservices (metrichost.net)
+### Customer plane (`metrichost` namespace)
 
-| Service | Language | Responsibility |
-|---------|----------|---------------|
-| **platform-gateway** | Java / Spring | JWT auth, tier-aware rate limiting (Redis), CORS, WebSocket STOMP routing, RegionRoutingFilter |
-| **auth-service** | Java / Spring | Registration, login, JWT issuance, email verification, MFA (TOTP), IP-based abuse detection |
-| **server-service** | Java / Spring | Game server lifecycle → K8s pods, RCON, file system, backups (MinIO), real-time console/metrics (STOMP + Kafka fan-out) |
-| **game-registry-service** | Java / Spring | Game image catalog, Docker image versions, admin API |
-| **user-service** | Java / Spring | Profiles, preferences, GDPR export/deletion, tier-based quotas, fleet.server_directory (multi-region index) |
-| **billing-service** | Java / Spring | Stripe subscriptions, plan enforcement, invoices, resource burst add-ons |
-| **hibernation-service** | Java / Spring | Warm-sleep/cold-hibernate, auto-idle detection, wake triggers |
-| **notification-service** | Java / Spring | Transactional email (Mailgun), Kafka event consumer |
-| **platform-proxy** | Java / Spring + Netty | TCP proxy, connection buffering, wake-on-connect |
-| **platform-common** | Java | Shared DTOs, entities, exception hierarchy, Kafka event contracts |
-| **platform-api** | Java | Auto-generated typed interfaces from merged OpenAPI specs |
+| Service | Port | Responsibility |
+|---|---|---|
+| **platform-gateway** | :8080 | RS256 JWT auth (JWKS from auth-service), tier-aware Redis rate limiting, CORS, WebSocket STOMP, `RegionRoutingFilter` |
+| **auth-service** | :8081 | Registration, login, RS256 JWT issuance (RSA-2048 private key; JWKS published at `/.well-known/jwks.json`), email verification, MFA (TOTP), IP-based abuse detection |
+| **server-service** | :8083 | Game-server lifecycle → K8s pods, RCON, file system, backups (MinIO), real-time console + metrics (STOMP + Kafka fan-out) |
+| **game-registry-service** | :8085 | Game image catalog, Docker image versions, modpack registry |
+| **user-service** | :8086 | Profiles, preferences, GDPR export/deletion, quotas, fleet directory (global server→region index) |
+| **billing-service** | :8087 | Stripe subscriptions, plan enforcement, invoices, resource burst add-ons |
+| **hibernation-service** | :8088 | `HibernationState` ladder (WARM / SOFT_FROZEN / DEEP_FROZEN) transitions, `IdleHibernationSweeper`, wake triggers |
+| **notification-service** | :8089 | Transactional email (Mailgun), Kafka event consumer |
+| **platform-proxy** | :25565 | Netty TCP proxy (`NioEventLoopGroup`), connection buffering, wake-on-connect |
+| **platform-common** | — | Shared DTOs, entities, exception hierarchy, Kafka event contracts (`ConsoleStreamEnvelope`, `MetricsStreamEnvelope`) |
+| **platform-api** | — | Auto-generated typed interfaces from merged OpenAPI specs |
 
-### Operator & Control Plane (separate repos, separate namespaces)
+### Operator & control plane (separate repos, separate namespaces)
 
-| Service | Language | Responsibility |
-|---------|----------|---------------|
-| **admin-api** | Go + pgx | Read-write PostgreSQL access to auth/users/servers/billing/audit schemas. Two pools: ro (SELECT-only) + rw (INSERT/UPDATE on admin tables). MFA freshness required for non-GET operations. JWKS-validated against auth-service. Namespace: `metrichost-admin-api`. |
-| **platform-admin** | Next.js 16 | Operator console at metrichost.org. Rewrites through platform-gateway for auth. Separate JWT tier from the user-facing frontend. |
-| **platform-control-plane** | Go + Terraform | Burst autoscaler (Temporal workflows + Hetzner provisioner), orphan reconciler, proactive headroom controller, Terraform-based static infrastructure management. Namespace: `metrichost-system`. |
-
-### Admin Plane Security Design
-
-The admin plane runs at a **separate domain** (metrichost.org) behind **separate k8s namespacing**. admin-api has no path to reach the game-servers namespace — `CiliumNetworkPolicy` allows only specific egress ports (5432 Postgres, 8080/8081 to platform services) and restricts ingress to platform-gateway pods only. Direct internet → admin-api is blocked at the network policy layer.
-
-MFA freshness is enforced on every non-GET request: each token carries a `mfa_verified_at` claim and the API rejects calls where that claim is stale beyond the configured freshness window.
+| Service | Stack | Responsibility |
+|---|---|---|
+| **admin-api** | Go · pgx · JWKS | Read-only operator API. Dual pgx pools (`admin_api_ro` SELECT-only; `admin_api_rw` for `auth.user_roles` + `audit.admin_actions` only). RBAC (5 roles × 11 scopes), two-person approval, MFA freshness, audit trail. Namespace `metrichost-admin-api`. |
+| **platform-admin** | Next.js 16 · TS | Operator console at operator subdomain; routes `/api/auth/*` and `/api/admin/*` through platform-gateway via Next.js rewrites. |
+| **platform-control-plane** | Go · Temporal · Terraform | Burst-worker autoscaler (Temporal workflows + Hetzner provisioning), orphan reconciler, proactive headroom controller. Namespace `metrichost-system`. |
 
 ---
 
 ## Security
 
+Defense-in-depth, fail-closed by default.
+
 | Threat | Mitigation |
-|--------|-----------|
-| Brute-force auth | IP-based rate limiting, tier-bucketed Redis |
-| Multi-account farming | Redis IP counter — 3 registrations/IP/24h |
-| WebSocket abuse | Separate rate limiter (5 conn/s, burst 10) |
-| TCP connection bombing | Netty `GameProxyServer` enforces `PROXY_MAX_CONNECTIONS_PER_IP` and `PROXY_MAX_CONNECTIONS_PER_SERVER` atomic counters. `IdleStateHandler` drops on read/write timeout. |
-| Crypto mining / CPU abuse | Automated CPU abuse detection, pod termination |
-| BOLA/IDOR | Fail-closed ownership validation on every resource: `validateOwnership(status, userId)` before any business logic |
-| JWT confusion | Algorithm pinned to HS256 (user-plane); RS256 JWKS (admin-plane) |
-| Info disclosure | Actuator restricted, heapdump/threaddump disabled |
-| Service spoofing | M2M API key (`X-Internal-Api-Key`) on all `/internal/**` endpoints |
-| Admin API lateral movement | `CiliumNetworkPolicy`: admin-api can only reach Postgres + platform-gateway; no direct path to game-servers namespace |
-| Admin session escalation | MFA freshness window on all admin write operations |
-| Cross-namespace k8s breach | Network policies isolate: `metrichost`, `game-servers`, `metrichost-admin-api`, `metrichost-system` — no cross-namespace traffic except explicit policy entries |
-| Supply-chain (images) | SHA-pinned images in production k8s deployments; GHCR for Go services |
+|---|---|
+| JWT confusion / algorithm substitution | RS256 with RSA-2048 keypair; `kid`-based JWKS rotation; `RsaJwtVerifier` pins RS256 — `alg=none` and `alg=HS256` tokens are rejected |
+| BOLA / IDOR | Every resource endpoint asserts authenticated `userId == ownerId` before any business logic; fail-closed |
+| Tenant starvation | Tier-bucketed Redis rate limits — a free-tier flood cannot exhaust paid capacity |
+| Operator privilege abuse | Two-person approval on impersonation + refunds (self-approval blocked, `ApprovalTTL = 15 min`); MFA freshness on all mutations; RBAC 5 roles × 11 scopes |
+| Operator data exfiltration | admin-api read-only by default; writes limited to `auth.user_roles` + `audit.admin_actions`; every mutation audited in `audit.admin_actions` |
+| Service spoofing | M2M `X-Internal-Key` required on all `/internal/**` endpoints |
+| Cross-namespace breach | `CiliumNetworkPolicy` isolates `metrichost`, `game-servers`, `metrichost-admin-api`, `metrichost-system`; game-servers cannot reach the platform namespace |
+| Multi-account farming | Redis IP counter — 3 registrations / IP / 24h; separate WebSocket rate limit |
+| Crypto-mining / CPU abuse | Automated CPU-abuse detection → pod termination |
+| TCP connection bombing | Netty `GameProxyServer` enforces `PROXY_MAX_CONNECTIONS_PER_IP` + `_PER_SERVER` atomic counters; `IdleStateHandler` fast-drops on read/write timeout |
+| Supply chain / boot integrity | Packer golden images (pre-hardened); no secrets in code — all via K8s `secretRef` (envFrom secretRef in pods) |
+| Info disclosure | Actuator restricted; heapdump/threaddump disabled |
+| Backup loss | Encrypted off-site PostgreSQL backups, fail-closed (empty-file detection) |
+| Content injection | CSP with a dynamic per-request nonce in the Next.js frontend |
+| Swap-related OOM | `swap-reclaim` DaemonSet only lowers `memory.high` on nodes with positive `SwapTotal`; it no-ops on swapless nodes, preventing anon-page throttle without backing store |
 
 ---
 
 ## Frontend
 
-The UI/UX was designed by a frontend developer I brought on and orchestrated — giving them creative freedom on the visual design. I then integrated it with the backend APIs and made it production-grade: auth flows, WebSocket console streaming, API contract enforcement, security hardening, CI/CD, Docker builds, and deployment.
+Two Next.js 16 / TypeScript 5 frontends.
 
-The interface uses a macOS-inspired desktop metaphor: draggable/resizable windows, dock, menu bar, 3D cube hero (Three.js), custom boot screen, real-time server console via WebSocket STOMP, file manager with inline editor, and a full mobile-responsive landing page.
+The **user dashboard** (`frontend`, 178 source files, 47,734 lines) uses a macOS-inspired desktop metaphor: draggable/resizable windows, a dock, a menu bar, a real-time server console over WebSocket STOMP, and a file manager with an inline editor. The visual design was produced by a frontend developer I brought on and orchestrated; I owned the backend integration and the production hardening — NextAuth session management with capped retry logic (no infinite refresh loops on auth degradation), CSRF tokens with timing-safe validation, input sanitization, WebSocket reconnect keyed to data arrival rather than connection state, and the API-contract CI gate.
 
-Key technical decisions I owned: NextAuth session management with capped retry logic (prevents infinite refresh loops on auth service degradation), CSRF token generation with timing-safe validation, WebSocket reconnect logic keyed to data arrival (not connection state), and the API contract check gate in CI.
+The **operator console** (`platform-admin`, 69 source files, 9,643 lines) is a separate frontend served at the operator subdomain, sharing the same JWT validation path through platform-gateway but a distinct auth tier.
 
 ---
 
 ## Testing
 
-No mocks for integration tests — real infrastructure via Testcontainers.
+No mocks for integration tests — real infrastructure via Testcontainers. 2,248 test source files in the Java backend alone.
 
 | Layer | Framework | Coverage |
-|-------|-----------|----------|
+|---|---|---|
 | Unit | JUnit 5 | Business logic, DTOs, validation |
 | Integration | Testcontainers | Real PostgreSQL, Redis, Redpanda, MinIO |
 | Contract | Spring Cloud Contract + CI gate | API shape verification against OpenAPI specs |
 | Migration | Flyway + Testcontainers | Schema migration correctness |
 | Frontend | Vitest | Auth, billing, CSRF, session management |
-| Go | `go test` + `-race` | Autoscaler logic, provisioner, reconciler |
-| Route integrity | `GatewayRoutePolicyTest` | Each service route registered + authenticated correctly (ROUTE-01..N) |
+| Go | `go test -race` | Autoscaler logic, provisioner, reconciler, approvals |
+| Route integrity | `GatewayRoutePolicyTest` | Each route registered + authenticated correctly (ROUTE-01..N) |
 
-The gateway's `GatewayRoutePolicyTest` is a regression lock for a class of bug where a route exists in the application config but is missing from `AuthenticationFilter.isPublicPath` — causing health probes and internal routes to return 401 silently.
+`GatewayRoutePolicyTest` is a regression lock for a class of bug where a route exists in config but is missing from the gateway's public-path allowlist — silently returning 401 to health probes and internal routes.
 
 ---
 
 ## Codebase
 
-| Repository | Stack | Scale |
-|------------|-------|-------|
-| **backend** | Java 21 · Spring Boot 3.4 · 11 Gradle subprojects | 10+ microservices, ~600 Flyway migrations |
-| **frontend** | Next.js 16 · TypeScript 5 · React | ~48,000 lines across 178 source files |
-| **platform-control-plane** | Go · Temporal · Terraform | ~65,000 lines across 270 Go files |
-| **admin-api** | Go · pgx · jwx · chi | ~95 Go files |
-| **platform-admin** | Next.js 16 · TypeScript | Separate operator console |
-| **K8s manifests** | YAML · Kustomize | 1,200+ manifests across base + per-environment overlays |
+| Component | Stack | Scale |
+|---|---|---|
+| **frontend** (user) | Next.js 16 · TS 5 | 178 TS/TSX files · 47,734 lines |
+| **platform-admin** (operator) | Next.js 16 · TS | 69 TS/TSX files · 9,643 lines |
+| **admin-api** | Go · pgx | 95 `.go` files · 16,575 lines |
+| **platform-control-plane** | Go · Temporal · Terraform | 270 `.go` files · 64,757 lines |
+| **Terraform / cloud-init** | HCL · cloud-init | 16,371 lines |
+| **K8s infra manifests** | YAML | 9,584 lines |
+| **backend** | Java 21 · Spring Boot 3.4 | 3,325 source + 2,248 test files across 11 Gradle subprojects (>100K lines) |
+| **schema** | Flyway | 50+ migration versions across 11 service schemas |
 
-Total source base: well over 150,000 lines of code across 5 active repositories, running on a production multi-region cluster.
+**Total: 6 repositories, 160,000+ lines across application code and Infrastructure-as-Code**, deployed to multi-node k3s clusters across two live regions.
 
 ---
 
@@ -592,12 +473,13 @@ Total source base: well over 150,000 lines of code across 5 active repositories,
 
 End-to-end ownership from product concept to bare metal:
 
-- **Distributed systems** — event-driven microservices (Kafka/Redpanda), Temporal-orchestrated durable workflows, multi-region data routing, leader-pod fan-out, fail-closed ownership validation, orphan reconciliation with timing-sensitive grace periods
-- **Platform / SRE** — self-managed Kubernetes (k3s), eBPF/Cilium (kubeProxy replacement, CiliumNetworkPolicy), Infrastructure-as-Code (Terraform · Ansible · Packer), disaster recovery, multi-region federation, burst autoscaling, observability stack
-- **Backend** — Java 21 / Spring Boot microservices, Go services (control plane + admin API), PostgreSQL, Redis, event sourcing patterns
-- **Frontend** — Next.js / React / TypeScript with real-time WebSocket UIs, API contract gates, production auth flow hardening
-- **Security** — Defense-in-depth: fail-closed authorization (BOLA/IDOR), network namespace isolation, MFA freshness enforcement, M2M API keys, algorithm-pinned JWTs, automated abuse detection
-- **Engineering judgment** — honest trade-offs: proactive headroom vs cost, multi-region routing transparency vs frontend simplicity, orphan reconciler safety vs provisioning liveness
+- **Distributed systems** — event-driven microservices (Kafka/Redpanda), Temporal-orchestrated durable workflows, multi-region region-direct data routing, leader-pod fan-out (per-pod Kafka consumer groups), fail-closed ownership validation, orphan reconciliation with timing-sensitive grace periods.
+- **Go services** — a read-only operator API with RBAC, two-person approval, and dual connection pools; a control-plane autoscaler with durable workflows and compensation.
+- **Platform / SRE** — self-managed multi-region k3s, Cilium eBPF (kube-proxy-replacement, `CiliumNetworkPolicy`), Infrastructure-as-Code (Terraform · Ansible · Packer · cloud-init), encrypted DR backups, burst autoscaling, and a per-cluster observability stack.
+- **Backend** — Java 21 / Spring Boot microservices, PostgreSQL per-service schemas, Redis, contract-tested API boundaries, RS256 JWT issuance and JWKS-based verification.
+- **Frontend** — Next.js / React / TypeScript with real-time WebSocket UIs, an API-contract CI gate, and production auth-flow hardening — twice (user dashboard + operator console).
+- **Security** — RS256 JWT pinning, BOLA/IDOR fail-closed authorization, network namespace isolation, MFA freshness, M2M API keys, two-person approval, automated abuse detection.
+- **Economic modeling through systems design** — the hibernation idle ladder is an explicit margin mechanism: reclaim idle RAM, resell it as density, and make otherwise-unviable high-cost regions profitable.
 
 ---
 
@@ -605,4 +487,4 @@ End-to-end ownership from product concept to bare metal:
 
 **Alexandru Cioc** · [@WhitehatD](https://github.com/WhitehatD)
 
-CS @ Maastricht University · Platform & infrastructure · Distributed systems · Security-first engineering
+Architecture and engineering, end to end — from the Next.js desktop UI to the eBPF datapath and the Temporal provisioning workflows.
