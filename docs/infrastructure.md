@@ -89,7 +89,7 @@ flowchart TB
 
 Terraform is the single source of truth for all static infrastructure. It provisions:
 
-- **VMs (cloud VPS):** Per-region modules provision the control-plane node and infra worker nodes. Core server types are driven by an `infra_profile_tag` variable (e.g. `32gb`=cpx62, `16gb`=cpx42) to allow different sizes per environment without modifying per-resource configuration.
+- **VMs (cloud VPS):** The EU cluster is built from flat root modules (`core_vps`, `infra_workers`, `game_worker_eu`); additional regions are encapsulated in reusable regional modules (`region_hil`, `region_ash`). Each provisions a control-plane node and worker nodes. Core server types are driven by an `infra_profile_tag` variable (e.g. `32gb`=cpx62, `16gb`=cpx42) to allow different sizes per environment without modifying per-resource configuration.
 - **Networks:** Private networks per region with non-overlapping CIDRs (EU: 10.0.0.0/16, US-West: 10.2.0.0/16, US-East: 10.1.0.0/16).
 - **Firewalls:** Hetzner cloud firewalls with per-region allowlists. The `admin_cidr` variable is validated to reject open ranges (`0.0.0.0/0`) — a deliberate safety guard against accidentally-open admin SSH.
 - **SSH keypairs:** Per-region, per-environment keypairs. Hetzner rejects duplicate public key values across keys regardless of name, so environments each have their own keypair.
@@ -198,9 +198,9 @@ flowchart TD
 **Activity timeouts:**
 - Database operations: 1-minute `StartToClose`, automatic retries with 1-second backoff.
 - Hetzner API calls: 2-minute `StartToClose`, 2-second retry backoff.
-- `WaitForCloudInit` / `WaitForNodeReady`: 12-minute `StartToClose`, single attempt (polling internally).
+- `WaitForCloudInit`: 12-minute `StartToClose` envelope wrapping an ≈10-minute internal SSH poll; `WaitForNodeReady`: same 12-minute envelope wrapping an ≈5-minute internal node-watch; `RunAnsibleHardening`: 6-minute `StartToClose`. All single-attempt (they poll internally).
 
-**Cloud-init retry loop:** Hetzner's Ubuntu 24.04 + cloud-init ≥ 25.3 stack has an intermittent `DataSourceHetzner` bug where a nil NIC during early boot produces a malformed IPv6 link-local metadata URL, crashing cloud-init before `runcmd` runs. The k3s agent installation never executes; the bootstrap marker is never written; `WaitForCloudInit` times out after 12 minutes. The fix is to destroy the failed VM and create a fresh one. `ProvisionWorkerWorkflow` retries the create-wait cycle up to `maxProvisionAttempts = 3` times, reducing the per-provision failure rate from ~30% to ~3%.
+**Cloud-init retry loop:** Hetzner's Ubuntu 24.04 + cloud-init ≥ 25.3 stack has an intermittent `DataSourceHetzner` bug where a nil NIC during early boot produces a malformed IPv6 link-local metadata URL, crashing cloud-init before `runcmd` runs. The k3s agent installation never executes; the bootstrap marker is never written; `WaitForCloudInit` exhausts its ≈10-minute internal poll (inside the 12-minute Temporal envelope). The fix is to destroy the failed VM and create a fresh one. `ProvisionWorkerWorkflow` retries the create-wait cycle up to `maxProvisionAttempts = 3` times, reducing the per-provision failure rate from ~30% to ~3%.
 
 **Rebind on retry:** The first attempt inserts a `worker_nodes` row pointing to the first Hetzner server. On retry, that server is destroyed and a new one is created with a new Hetzner ID. The workflow does not insert a new row — it rebinds the existing row (`RebindWorkerServer`) to point at the new server. Skipping this would leave the DB row holding the destroyed server's ID, causing the orphan reconciler to classify the healthy replacement as an unrecorded VPS and destroy it.
 
@@ -218,8 +218,8 @@ Temporal serializes activity parameters as JSON before storing them in its event
 The fix: extract the error message string *before* passing it to `ExecuteActivity`:
 
 ```go
-// CORRECT — pass a string, not an interface
-workflow.ExecuteActivity(ctx, "RecordLifecycleEvent", workerID, "ansible_hardening_failed", err.Error())
+// CORRECT — pass the message string, not the error interface
+workflow.ExecuteActivity(ctx, "RecordWorkflowFailed", ref, req, workflowErr.Error())
 ```
 
 Rule: never pass interface types (especially `error`) as Temporal activity arguments. Extract concrete values (`string`, `int`, structs with concrete fields) before the `ExecuteActivity` call.
@@ -238,10 +238,10 @@ When `deficit > 0` and the reactive path hasn't already covered it this tick (in
 
 `ReconcileOrphans` detects and resolves discrepancies between the Hetzner API (what VMs exist) and the control-plane database (what workers are tracked). A node with `metrichost.net/managed-by != controlplane` is immediately skipped — the reconciler never touches Terraform-managed baseline workers.
 
-For control-plane-owned nodes, orphan categories:
-- **HetznerNoRecord:** A Hetzner server exists with the right labels but no DB row → destroy (provisioner bug or interrupted create).
-- **RecordNoHetzner:** A DB row exists but the Hetzner server is gone → mark the row as terminated (Hetzner-side deletion).
-- **NodeNoRecord:** A k3s node exists (labeled `managed-by=controlplane`) but no DB row → cordon and drain, then destroy (leaked node from a failed record-step).
+For control-plane-owned nodes, orphan categories (the `OrphanType` constants in `reconcile.go`):
+- **`OrphanHetznerNoRecord`** (`hetzner_no_record`): A Hetzner VPS exists with the right labels but no DB row → destroy (provisioner bug or interrupted create).
+- **`OrphanK8sNoRecord`** (`k8s_no_record`): A k3s node exists (labeled `managed-by=controlplane`) but no DB row → delete the node (leaked node from a failed record-step).
+- **`OrphanRecordNoNode`** (`record_no_resources`): A DB row exists but *neither* the Hetzner VPS *nor* the k3s node is present → mark the row terminated.
 
 A grace period (`OrphanGracePeriod`, typically several minutes) prevents the reconciler from acting on nodes that are in the middle of a provision workflow.
 

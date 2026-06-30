@@ -155,7 +155,7 @@ WebSocket upgrades from the browser go to this BFF route (same origin → no COR
 
 ## 6. Terraform Multi-Region
 
-Infrastructure for each region lives in a per-region Terraform module with non-overlapping CIDR ranges:
+The EU cluster is the original flat root composition (`core_vps`, `network`, `firewall`, `infra_workers`, `game_worker_eu`); each *additional* region is added as a self-contained regional module (`region_hil`, `region_ash`), each with non-overlapping CIDR ranges:
 
 | Region | Code | Network (example) | Status |
 |---|---|---|---|
@@ -163,9 +163,9 @@ Infrastructure for each region lives in a per-region Terraform module with non-o
 | US-West | `hil` | 10.2.0.0/16 | Live |
 | US-East | `ash` | 10.1.0.0/16 | Config-ready; `count=0` pending cloud capacity |
 
-Each region module provisions: VMs (control-plane node and workers), a private network, a cloud firewall, SSH keypairs, cloud-init data, and a Cloudflare tunnel (`api-{region}.example.tld`).
+Each regional module provisions: VMs (control-plane node and workers), a private network, a cloud firewall, SSH keypairs, cloud-init data, and a Cloudflare tunnel (`api-{region}.example.tld`).
 
-Regions are count-gated with `enable_region_{code}` variables. Setting `enable_region_ash=false` (the current state for US-East) provisions no resources in that module without modifying EU configuration. Adding a new region is a matter of adding a new module invocation with the next non-overlapping CIDR block.
+Regional modules are count-gated with `enable_region_{code}` variables. Setting `enable_region_ash=false` (the current state for US-East) provisions no resources in that module without modifying the EU root configuration. Adding a new region is a matter of adding a new regional module invocation with the next non-overlapping CIDR block.
 
 Remote state ensures that the Terraform executor always works against the live infrastructure state. A plan-first review step (`executor_plan` job in `deploy-terraform.yml`) runs `terraform plan` against the real state on the executor VM before any apply.
 

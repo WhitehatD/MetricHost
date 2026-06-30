@@ -167,7 +167,7 @@ Not all games are equal in RAM cost or wake tolerance. A Minecraft modpack at 16
 | `keepListed` | true | Whether the server remains listed while frozen. |
 | `maxWakeSecondsSla` | 10 | Maximum wake latency allowed; drives which rung may be used. |
 
-`HibernationSettings` (per-server overrides, stored in the `hibernation` schema) can further customize `idleThresholdMinutes`, `softFreezeThresholdMinutes`, `deepFreezeThresholdMinutes`, and the `alwaysOnEnabled` flag. These are set at server creation from the owner's tier and can be updated by `BillingEventConsumer` when the subscription changes.
+In the current implementation, the live `IdleHibernationSweeper` reads its escalation thresholds from the per-server `HibernationSettings` (`idleThresholdMinutes`, `softFreezeThresholdMinutes`, `deepFreezeThresholdMinutes`, `alwaysOnEnabled` — stored in the `hibernation` schema), seeded at server creation from the owner's tier (FREE 10 m, STARTER 30 m, …) and updated by `BillingEventConsumer` on subscription changes. The `GameImage` fields above define the per-game-type profile *model* — the seam for game-type-specific timings — but the sweeper keys off `HibernationSettings` today rather than reading `GameImage` directly.
 
 ---
 
@@ -188,7 +188,7 @@ The flag has no effect on FREE tier servers: those follow the hard-hibernate pat
 From a player's point of view, the most important guarantee is that they never see "server offline" when the server is merely sleeping. The platform maintains this by:
 
 1. **platform-proxy** (Netty `NioEventLoopGroup`) listens on per-server TCP ports allocated from a base port (`30000`); the per-game default upstream target (e.g. `25565` for Minecraft) is what the proxy forwards *to*. When a new TCP connection arrives, the proxy checks the server's hibernation state before forwarding.
-2. If the server is WARM or SOFT_FROZEN (or DEEP_FROZEN in FAST_RESTART mode), the proxy **buffers the inbound bytes** in a per-server buffer and issues a **synchronous HTTP wake call** to hibernation-service.
+2. If the server is WARM or SOFT_FROZEN (or DEEP_FROZEN in FAST_RESTART mode), the proxy **buffers the inbound bytes** in a per-connection queue (`ConcurrentLinkedQueue<ByteBuf>`) and issues a **synchronous HTTP wake call** to hibernation-service.
 3. `hibernation-service` publishes a wake request to Redpanda; `server-service` consumes it and performs the K8s operations (CPU restore, annotation removal).
 5. Once the readiness probe passes, `server-service` publishes a `STATUS_CHANGED (ACTIVE)` event.
 6. `hibernation-service` consumes the event and signals the proxy.
