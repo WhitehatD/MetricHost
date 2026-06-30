@@ -101,7 +101,7 @@ There are two write paths, by design:
 
 **Direct HTTP write (regional path):** `FleetRegistryInternalController` exposes `PUT /internal/fleet/server-directory/{serverId}` — an internal endpoint (M2M API key required) for regional `server-service` instances to write directly to the EU user-service. This is necessary because regional Redpanda is independent — a `ServerCreatedEvent` published to the HIL Redpanda does not reach EU Redpanda where `ServerDirectoryConsumer` is listening.
 
-The dual-write is the concrete solution to the cross-region Kafka problem: regional server-service both publishes to its local Kafka (for local consumers: hibernation, notification) and calls the global user-service HTTP endpoint to ensure the fleet directory is updated.
+The dual-write is the concrete solution to the cross-region Kafka problem: regional server-service both publishes to its local Kafka (for local consumers: hibernation, notification) and calls the global user-service HTTP endpoint to write the fleet directory entry directly (best-effort — see §8 for the delivery semantics).
 
 ### How the directory is queried
 
