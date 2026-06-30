@@ -5,7 +5,7 @@
 <h1 align="center">MetricHost</h1>
 
 <p align="center">
-  <em>A production, multi-tenant game-server hosting platform built end-to-end — from a Next.js desktop UI and a fleet of Spring Boot microservices, through a Go control plane with Temporal-orchestrated burst provisioning, down to multi-region self-managed Kubernetes, eBPF networking, and full Infrastructure-as-Code.</em>
+  <em>A production, multi-tenant game-server hosting platform spanning a Next.js desktop UI, a fleet of Spring Boot microservices, a Go control plane with Temporal-orchestrated burst provisioning, multi-region self-managed Kubernetes, eBPF networking, and full Infrastructure-as-Code.</em>
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@
 
 MetricHost is an enterprise-grade, multi-tenant game-server hosting platform — comparable in scope to Pterodactyl plus Vercel, but architected as a distributed system rather than a panel. It supports Minecraft, Valheim, Terraria, Rust, and more.
 
-I architected and built it end-to-end: nine Spring Boot microservices plus a gateway and a TCP proxy, two Go services (a read-only operator API and a control-plane autoscaler), a Next.js user desktop and a separate operator console, Stripe billing, event-driven GDPR compliance, and a six-repository CI/CD system — all running on self-managed multi-region k3s clusters with a flannel→Cilium (eBPF) CNI migration, full Infrastructure-as-Code (Terraform + Ansible + Packer + cloud-init), off-site disaster-recovery backups with verified restores, and a Prometheus/Grafana/Loki observability stack.
+I led this as the architect and lead engineer, and I'm the one who carries the client relationship. The backend is mine in full — the nine Spring Boot microservices, the gateway and TCP proxy, the operator API, Stripe billing, the event-driven GDPR pipeline, and the six-repository CI/CD system — and so is the platform underneath it: self-managed multi-region k3s, the flannel→Cilium (eBPF) migration, the Terraform/Ansible/Packer/cloud-init IaC, off-site backups with verified restores, and the Prometheus/Grafana/Loki stack. I didn't build it alone, though. A second engineer I brought on — a frontend developer who also knew his way around infrastructure — sketched the first version of the frontend and stood up the first working control plane, and helped on the backend now and then. I carried the control plane the rest of the way to production, and made the frontend my own through integration and hardening.
 
 Source code is proprietary. This repository documents the architecture and the engineering decisions behind it.
 
@@ -156,7 +156,7 @@ Running hundreds of game servers across multiple game types demands infrastructu
 
 ## Platform Engineering
 
-Beyond the application, I built and operate the platform it runs on — the layer most "I shipped a SaaS" projects never touch. Full depth in [docs/infrastructure.md](docs/infrastructure.md).
+Beyond the application, I own and operate the platform it runs on — the layer most "I shipped a SaaS" projects never touch. Full depth in [docs/infrastructure.md](docs/infrastructure.md).
 
 - **Infrastructure-as-Code, end to end.** Terraform provisions cloud VMs, networks, firewalls, SSH keypairs, and load balancers with remote state and per-region, count-gated modules. Ansible hardens every node (SSH config, fail2ban, unattended-upgrades, firewall, kernel params, system limits). Packer builds a pre-hardened golden image so burst workers skip live hardening on first boot. cloud-init handles per-node bootstrap: k3s join, deterministic hostname pinning for fleet reconciliation, and NodeSwap configuration on game nodes.
 - **Self-managed multi-region k3s.** An EU production cluster (control-plane node + three infra workers carrying Redpanda and Temporal) plus an independent single-node staging cluster, and a live US-West regional cluster carrying the regional data plane only. A US-East region is provisioned in Terraform but count-gated to zero pending cloud-provider capacity. Clusters are separated by non-overlapping CIDR ranges.
@@ -429,7 +429,7 @@ Defense-in-depth, fail-closed by default.
 
 Two Next.js 16 / TypeScript 5 frontends.
 
-The **user dashboard** (`frontend`, 178 source files, 47,734 lines) uses a macOS-inspired desktop metaphor: draggable/resizable windows, a dock, a menu bar, a real-time server console over WebSocket STOMP, and a file manager with an inline editor. The visual design was produced by a frontend developer I brought on and orchestrated; I owned the backend integration and the production hardening — NextAuth session management with capped retry logic (no infinite refresh loops on auth degradation), CSRF tokens with timing-safe validation, input sanitization, WebSocket reconnect keyed to data arrival rather than connection state, and the API-contract CI gate.
+The **user dashboard** (`frontend`, 178 source files, 47,734 lines) uses a macOS-inspired desktop metaphor: draggable/resizable windows, a dock, a menu bar, a real-time server console over WebSocket STOMP, and a file manager with an inline editor. The first cut of the frontend — its concept and visual design — came from the second engineer I brought on. I took it from there: expanding and polishing the UI, and owning everything underneath it — session management (NextAuth with capped retry logic, so a degraded auth backend can't spiral into an infinite refresh loop), CSRF tokens with timing-safe validation, input sanitization, WebSocket reconnect keyed to data arrival rather than connection state, and the API-contract CI gate.
 
 The **operator console** (`platform-admin`, 69 source files, 9,643 lines) is a separate frontend served at the operator subdomain, sharing the same JWT validation path through platform-gateway but a distinct auth tier.
 
@@ -475,7 +475,7 @@ No mocks for integration tests — real infrastructure via Testcontainers. ~300 
 End-to-end ownership from product concept to bare metal:
 
 - **Distributed systems** — event-driven microservices (Kafka/Redpanda), Temporal-orchestrated durable workflows, multi-region region-direct data routing, leader-pod fan-out (per-pod Kafka consumer groups), fail-closed ownership validation, orphan reconciliation with timing-sensitive grace periods.
-- **Go services** — a read-only operator API with RBAC, two-person approval, and dual connection pools; a control-plane autoscaler with durable workflows and compensation.
+- **Go services** — a read-only operator API with RBAC, two-person approval, and dual connection pools; and expanding a Temporal-driven control-plane autoscaler to production (durable workflows, compensation, orphan reconciliation, headroom control).
 - **Platform / SRE** — self-managed multi-region k3s, Cilium eBPF CNI (`CiliumNetworkPolicy`), Infrastructure-as-Code (Terraform · Ansible · Packer · cloud-init), off-site DR backups with verified restores, burst autoscaling, and a per-cluster observability stack.
 - **Backend** — Java 21 / Spring Boot microservices, PostgreSQL per-service schemas, Redis, contract-tested API boundaries, RS256 JWT issuance and JWKS-based verification.
 - **Frontend** — Next.js / React / TypeScript with real-time WebSocket UIs, an API-contract CI gate, and production auth-flow hardening — twice (user dashboard + operator console).
@@ -488,4 +488,4 @@ End-to-end ownership from product concept to bare metal:
 
 **Alexandru Cioc** · [@WhitehatD](https://github.com/WhitehatD)
 
-Architecture and engineering, end to end — from the Next.js desktop UI to the eBPF datapath and the Temporal provisioning workflows.
+Lead engineer and architect. I own the backend, the platform and infrastructure, the production hardening, and the client relationship. A second engineer I brought on got the frontend and the first working control plane off the ground; I took both to production — hardening and extending the control plane, integrating and polishing the frontend.
