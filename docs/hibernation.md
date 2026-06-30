@@ -196,7 +196,7 @@ From a player's point of view, the most important guarantee is that they never s
 
 The player's game client sends a login packet, receives a buffered "waking" status response, and then gets a seamless handoff to the live server once it's ready. The game port never closes — the player's client does not time out because the proxy holds the TCP connection open.
 
-Edge defense runs at the proxy layer: `PROXY_MAX_CONNECTIONS_PER_IP` and `PROXY_MAX_CONNECTIONS_PER_SERVER` atomic counters prevent connection flooding, and `IdleStateHandler` fast-drops connections that don't complete a login handshake within timeout.
+Edge defense runs at the proxy layer: `PROXY_MAX_CONNECTIONS_PER_IP` and `PROXY_MAX_CONNECTIONS_PER_SERVER` atomic counters prevent connection flooding, and a Netty `IdleStateHandler` fast-drops connections that go idle on read/write past the configured timeout.
 
 ---
 
