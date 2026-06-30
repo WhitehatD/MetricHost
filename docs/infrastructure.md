@@ -11,7 +11,7 @@ Managed Kubernetes (EKS, GKE, AKS) imposes constraints that conflict with game-s
 | Constraint | Managed K8s | Self-managed k3s |
 |---|---|---|
 | Node-level swap | Not available (EKS/GKE disable swap) | `failSwapOn: false` + `LimitedSwap` policy via cloud-init |
-| Custom CNI with kube-proxy-replacement | Restricted or unsupported | Cilium eBPF with `kubeProxyReplacement=true` |
+| Custom CNI choice | Restricted or unsupported | Cilium eBPF, self-installed |
 | hostNetwork game ports | Heavily restricted | Full control |
 | Custom cloud-init per node type | Not possible | Per-node type templates |
 | IaC-managed node provisioning | Managed node groups only | Terraform + Ansible + Packer, full stack |
@@ -47,7 +47,7 @@ A single-node k3s cluster carrying the regional data plane only: server-service,
 | `game-servers` | Game pods. NetworkPolicy prevents reaching the `metrichost` namespace. |
 | `metrichost-admin-api` | admin-api (Go) + its own PG. Isolated with explicit cross-namespace rules only for specific services. |
 | `metrichost-system` | platform-control-plane, Temporal server, Temporal PostgreSQL. |
-| `monitoring` | Prometheus, Grafana, Loki, Alertmanager, blackbox exporters. |
+| `monitoring` | Prometheus, Grafana, Loki, Alertmanager (kube-prometheus stack). |
 | `kube-system` | `swap-reclaim` DaemonSet (plus standard k3s components). |
 
 ```mermaid
@@ -146,7 +146,7 @@ The result: burst workers that boot from the golden image skip the slow Ansible 
 cloud-init runs on first boot of every node (both static Terraform-managed and Hetzner API-created burst workers). It handles:
 
 - **k3s join:** Installs k3s with the join URL and token. For burst workers, cloud-init is rendered per-provision with the private core IP and a one-time join token, not a static URL.
-- **Hostname pinning:** Sets a deterministic hostname (`metrichost-worker-{id}`) so the orphan reconciler can match Hetzner nodes to k3s nodes by name — a predictable name is the reconciler's join key.
+- **Hostname pinning (static nodes):** Terraform-managed nodes set a deterministic hostname via cloud-init so a recreated node rejoins k3s under the same fleet name. Burst workers join under their Hetzner-assigned name (`mh-worker-{region}-{id}`); the orphan reconciler matches them to control-plane DB records by Hetzner server ID, not by hostname.
 - **SSH host key pinning:** For burst workers, a pre-generated SSH host keypair is injected via cloud-init so `WaitForCloudInit` can verify the SSH connection against a known public key (stored in `known_hosts`) rather than accepting any key. This closes the TOCTOU window between provisioning and verification.
 - **NodeSwap configuration for game workers:** Game worker nodes need `failSwapOn: false` and `LimitedSwap` kubelet policy to enable the SOFT_FROZEN hibernation rung. These are set in the kubelet config written by cloud-init. Core and infra nodes do not receive this configuration.
 
@@ -189,7 +189,7 @@ flowchart TD
     E --> F[WaitForCloudInit\nSSH poll on private IP]
     F --> G[WaitForNodeReady\nK8s node watch + taint lift]
     G --> H[RunAnsibleHardening\nbest-effort, non-blocking]
-    H --> I[RecordWorkerReady\ndatabase update]
+    H --> I[FinalizeWorkerReady\ndatabase update]
     I --> J[RecordLifecycleEvent\nprovisioned]
     style D fill:#f85149,color:#fff
     style FAIL fill:#f85149,color:#fff
@@ -249,15 +249,16 @@ A grace period (`OrphanGracePeriod`, typically several minutes) prevents the rec
 
 ## 9. Cilium eBPF CNI Migration
 
-The platform migrated from flannel (the k3s default CNI) to Cilium eBPF for three reasons:
+The platform migrated from flannel (the k3s default CNI) to Cilium eBPF for two reasons:
 
-1. **`kubeProxyReplacement=true`:** kube-proxy is removed entirely. The BPF datapath handles all service routing (ClusterIP, NodePort, LoadBalancer) directly in the kernel, without iptables chains. For game server traffic (high-throughput TCP), the iptables path adds measurable overhead; BPF avoids it.
-2. **`CiliumNetworkPolicy`:** Identity-based (rather than IP-based) network policies. Cilium assigns a numeric identity to each pod group (namespace + label selector) and enforces policies in BPF maps — no iptables rules to manage, sub-millisecond enforcement.
-3. **Namespace isolation without IP tracking:** The `game-servers` namespace is isolated from `metrichost` by a `CiliumNetworkPolicy` that blocks all egress from game pods to the platform namespace. A compromised game mod cannot make HTTP calls to the billing API or any other platform service.
+1. **eBPF datapath:** Cilium processes packets and enforces network policy in the kernel via eBPF programs and maps rather than long iptables chains, which scale poorly as the number of services and policies grows.
+2. **`CiliumNetworkPolicy`:** Identity-based (rather than IP-based) network policies. Cilium assigns a numeric identity to each pod group (namespace + label selector) and enforces policies in BPF maps. The `game-servers` namespace is isolated from `metrichost` by a policy that blocks egress from game pods to the platform namespace — a compromised game mod cannot reach the billing API or any other platform service.
+
+The install keeps kube-proxy in place (`kubeProxyReplacement` is **not** enabled); the win here is the eBPF policy datapath and identity-based isolation, not kube-proxy elimination.
 
 ### Migration methodology
 
-The migration was validated on a disposable throwaway cluster — a separate VM environment spun up specifically for CNI validation. The full test matrix (service routing, NetworkPolicy enforcement, DNS, inter-pod communication, NodePort) was verified on the throwaway cluster before the production cutover. Post-migration, stale flannel interfaces (`flannel.1`) were cleaned from all nodes.
+The migration was validated on staging plus a disposable throwaway VM before the production cutover — exercising service routing, NetworkPolicy enforcement, DNS, and inter-pod communication. Post-migration, stale flannel interfaces (`flannel.1`) were cleaned from all nodes.
 
 ### Cilium on k3s
 
@@ -275,9 +276,8 @@ Each cluster runs an independent observability stack in its `monitoring` namespa
 
 - **Prometheus:** Scrapes all platform services, game-server pods, kube-state-metrics, and node-exporter (via kube-prometheus DaemonSet). Platform services expose Spring Boot Actuator `/actuator/prometheus` endpoints.
 - **Grafana:** Dashboards for per-service metrics, cluster health, game pod resource usage, hibernation ladder transitions, and burst worker provisioning latency.
-- **Loki:** Log aggregation from all pods. Promtail (or Grafana Alloy) on each node ships logs to the cluster-local Loki.
+- **Loki:** Log aggregation, deployed alongside the kube-prometheus stack.
 - **Alertmanager:** Alert routing. Watchdog and embedded k3s control-plane component alerts are intentionally suppressed. Real alerts: `CPUThrottlingHigh` (info) when game pods exceed CPU limits.
-- **Blackbox exporters:** HTTP/HTTPS probes for all service health endpoints and for the regional API gateway (`/actuator/health`).
 
 HPA (Horizontal Pod Autoscaler) is configured for stateless platform services (auth-service, server-service, etc.) using `metrics-server`. Stateful services (Redis, Redpanda, PostgreSQL) are not HPA-managed.
 
@@ -295,6 +295,4 @@ No node in any cluster has inbound TCP ports open to the internet. All access �
 
 ## 12. Disaster Recovery
 
-PostgreSQL backups are encrypted and shipped to off-site storage on a scheduled basis. The backup process is fail-closed: an empty backup file (produced by a silent error in `pg_dump`) is detected and triggers an alert rather than being silently trusted as a successful backup. A corrupted or empty backup is worse than a missing one — it provides false assurance.
-
-Restore procedures are documented and have been verified against a staging restore. The verification step includes checking that the restored schema matches the expected Flyway migration version.
+PostgreSQL is dumped with `pg_dumpall`, gzip-compressed, and shipped to off-site object storage (Cloudflare R2) on a schedule with retention. Because a corrupted or empty backup is worse than a missing one — it provides false assurance — restores are verified rather than assumed: a separate restore-verification job restores a backup into a throwaway database and checks that the restored schema matches the expected Flyway migration version.

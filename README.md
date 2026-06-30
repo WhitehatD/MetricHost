@@ -27,7 +27,7 @@
 
 MetricHost is an enterprise-grade, multi-tenant game-server hosting platform — comparable in scope to Pterodactyl plus Vercel, but architected as a distributed system rather than a panel. It supports Minecraft, Valheim, Terraria, Rust, and more.
 
-I architected and built it end-to-end: nine Spring Boot microservices plus a gateway and a TCP proxy, two Go services (a read-only operator API and a control-plane autoscaler), a Next.js user desktop and a separate operator console, Stripe billing, event-driven GDPR compliance, and a six-repository CI/CD system — all running on self-managed multi-region k3s clusters with a flannel→Cilium (eBPF) CNI migration, full Infrastructure-as-Code (Terraform + Ansible + Packer + cloud-init), encrypted off-site disaster-recovery backups, and a Prometheus/Grafana/Loki observability stack.
+I architected and built it end-to-end: nine Spring Boot microservices plus a gateway and a TCP proxy, two Go services (a read-only operator API and a control-plane autoscaler), a Next.js user desktop and a separate operator console, Stripe billing, event-driven GDPR compliance, and a six-repository CI/CD system — all running on self-managed multi-region k3s clusters with a flannel→Cilium (eBPF) CNI migration, full Infrastructure-as-Code (Terraform + Ansible + Packer + cloud-init), off-site disaster-recovery backups with verified restores, and a Prometheus/Grafana/Loki observability stack.
 
 Source code is proprietary. This repository documents the architecture and the engineering decisions behind it.
 
@@ -40,7 +40,7 @@ Source code is proprietary. This repository documents the architecture and the e
 | **What** | Multi-tenant game-server hosting platform (Minecraft, Valheim, Terraria, Rust, and more) |
 | **Backend** | Java 21 · Spring Boot 3.4 · 11 Gradle subprojects (9 microservices + gateway + TCP proxy) · two Go services (operator API + control plane) |
 | **Frontend** | Next.js 16 · TypeScript 5 — a macOS-inspired desktop UI for users, plus a separate operator console |
-| **Infra** | Self-managed multi-region k3s · Cilium eBPF (kube-proxy-replacement) · Terraform / Ansible / Packer / cloud-init · Temporal-orchestrated burst autoscaler |
+| **Infra** | Self-managed multi-region k3s · Cilium eBPF CNI · Terraform / Ansible / Packer / cloud-init · Temporal-orchestrated burst autoscaler |
 | **Key innovation** | A four-rung [hibernation idle ladder](docs/hibernation.md) that reclaims idle RAM and resells it — turning a RAM-constrained business into a density play |
 | **Scale** | 6 repositories · 160,000+ lines across application code and Infrastructure-as-Code · multi-node k3s clusters across two live regions |
 
@@ -81,7 +81,7 @@ graph TB
     end
 
     subgraph Game["Game Plane (game-servers ns)"]
-        PROXY[platform-proxy :25565<br/>Netty TCP · wake-on-connect]
+        PROXY[platform-proxy :30000+<br/>Netty TCP · wake-on-connect]
         PODS[Game Pods<br/>region-pinned nodeAffinity]
     end
 
@@ -96,7 +96,7 @@ graph TB
         REDIS[(Redis 7<br/>rate limits · leader election)]
         KAFKA[(Redpanda<br/>Kafka events)]
         MINIO[(MinIO<br/>backups · exports)]
-        MON[Prometheus · Grafana<br/>Loki · Alertmanager · blackbox]
+        MON[Prometheus · Grafana<br/>Loki · Alertmanager]
     end
 
     Player --> CF --> PROXY --> PODS
@@ -160,11 +160,11 @@ Beyond the application, I built and operate the platform it runs on — the laye
 
 - **Infrastructure-as-Code, end to end.** Terraform provisions cloud VMs, networks, firewalls, SSH keypairs, and load balancers with remote state and per-region, count-gated modules. Ansible hardens every node (SSH config, fail2ban, unattended-upgrades, firewall, kernel params, system limits). Packer builds a pre-hardened golden image so burst workers skip live hardening on first boot. cloud-init handles per-node bootstrap: k3s join, deterministic hostname pinning for fleet reconciliation, and NodeSwap configuration on game nodes.
 - **Self-managed multi-region k3s.** An EU production cluster (control-plane node + three infra workers carrying Redpanda and Temporal) plus an independent single-node staging cluster, and a live US-West regional cluster carrying the regional data plane only. A US-East region is provisioned in Terraform but count-gated to zero pending cloud-provider capacity. Clusters are separated by non-overlapping CIDR ranges.
-- **Cilium eBPF CNI.** Migrated the network data plane from flannel to Cilium with `kubeProxyReplacement=true`, removing kube-proxy entirely. Identity-based `CiliumNetworkPolicy` governs namespace and pod isolation. The full cutover was validated on disposable throwaway clusters before touching production; stale flannel interfaces were cleaned post-migration.
+- **Cilium eBPF CNI.** Migrated the network data plane from flannel to Cilium, moving network-policy enforcement onto the eBPF datapath. Identity-based `CiliumNetworkPolicy` governs namespace and pod isolation. The cutover was validated on staging plus a disposable throwaway VM before touching production; stale flannel interfaces were cleaned post-migration.
 - **Temporal-driven burst autoscaler.** A Go control plane provisions game nodes on demand through durable Temporal workflows (create node → cloud-init → k3s join → Ansible harden → Ready), with a proactive headroom controller keeping at least one validated worker pre-warmed and an orphan reconciler that only ever deletes control-plane-owned nodes (`metrichost.net/managed-by=controlplane`).
 - **Two-tier game node fleet.** A static, Terraform-managed warm baseline worker (always Ready, no cold-burst delay) plus on-demand burst workers. Ownership labels (`metrichost.net/managed-by=terraform` vs `metrichost.net/managed-by=controlplane`) keep the reconciler from ever touching the static baseline.
-- **Encrypted off-site DR backups.** PostgreSQL backups are encrypted and shipped off-site, fail-closed: an empty-file backup is detected and alerted rather than silently trusted.
-- **Observability per cluster.** Prometheus, Grafana, Loki, Alertmanager, and blackbox probes run independently in each cluster's `monitoring` namespace. HPA drives horizontal scaling on stateless platform services via metrics-server.
+- **Off-site DR backups with verified restores.** PostgreSQL is dumped, gzip-compressed, and shipped to off-site object storage on a schedule with retention. A separate restore-verification job restores a backup into a throwaway database and checks the schema against the expected Flyway version — a corrupt or empty backup gives false assurance, so restores are verified rather than assumed.
+- **Observability per cluster.** Prometheus, Grafana, Loki, and Alertmanager (kube-prometheus stack) run independently in each cluster's `monitoring` namespace. HPA drives horizontal scaling on stateless platform services via metrics-server.
 - **Zero-open-port edge.** Cloudflare fronts everything via cloudflared tunnels (no inbound ports on any node), with TLS, WAF, and per-region API subdomains (`api-{region}.example.tld`). Traefik terminates ingress inside each cluster; cert-manager automates certificates.
 
 ---
@@ -204,7 +204,7 @@ sequenceDiagram
     participant K8s as Kubernetes API
     participant PODS as Game Pod
 
-    Player->>Proxy: TCP SYN (:25565)
+    Player->>Proxy: TCP SYN (:30000+)
 
     rect rgb(60, 20, 20)
         Note over Proxy: Edge defense perimeter
@@ -387,7 +387,7 @@ Each of the six repositories owns an independent CI pipeline. A **skip guard** d
 | **billing-service** | :8087 | Stripe subscriptions, plan enforcement, invoices, resource burst add-ons |
 | **hibernation-service** | :8088 | `HibernationState` ladder (WARM / SOFT_FROZEN / DEEP_FROZEN) transitions, `IdleHibernationSweeper`, wake triggers |
 | **notification-service** | :8089 | Transactional email (Mailgun), Kafka event consumer |
-| **platform-proxy** | :25565 | Netty TCP proxy (`NioEventLoopGroup`), connection buffering, wake-on-connect |
+| **platform-proxy** | :30000+ | Netty TCP proxy (`NioEventLoopGroup`, base port 30000), connection buffering, wake-on-connect |
 | **platform-common** | — | Shared DTOs, entities, exception hierarchy, Kafka event contracts (`ConsoleStreamEnvelope`, `MetricsStreamEnvelope`) |
 | **platform-api** | — | Auto-generated typed interfaces from merged OpenAPI specs |
 
@@ -419,7 +419,7 @@ Defense-in-depth, fail-closed by default.
 | TCP connection bombing | Netty `GameProxyServer` enforces `PROXY_MAX_CONNECTIONS_PER_IP` + `_PER_SERVER` atomic counters; `IdleStateHandler` fast-drops on read/write timeout |
 | Supply chain / boot integrity | Packer golden images (pre-hardened); no secrets in code — all via K8s `secretRef` (envFrom secretRef in pods) |
 | Info disclosure | Actuator restricted; heapdump/threaddump disabled |
-| Backup loss | Encrypted off-site PostgreSQL backups, fail-closed (empty-file detection) |
+| Backup loss | Automated off-site PostgreSQL backups (compressed, scheduled, retained) with a restore-verification job |
 | Content injection | CSP with a dynamic per-request nonce in the Next.js frontend |
 | Swap-related OOM | `swap-reclaim` DaemonSet only lowers `memory.high` on nodes with positive `SwapTotal`; it no-ops on swapless nodes, preventing anon-page throttle without backing store |
 
@@ -476,7 +476,7 @@ End-to-end ownership from product concept to bare metal:
 
 - **Distributed systems** — event-driven microservices (Kafka/Redpanda), Temporal-orchestrated durable workflows, multi-region region-direct data routing, leader-pod fan-out (per-pod Kafka consumer groups), fail-closed ownership validation, orphan reconciliation with timing-sensitive grace periods.
 - **Go services** — a read-only operator API with RBAC, two-person approval, and dual connection pools; a control-plane autoscaler with durable workflows and compensation.
-- **Platform / SRE** — self-managed multi-region k3s, Cilium eBPF (kube-proxy-replacement, `CiliumNetworkPolicy`), Infrastructure-as-Code (Terraform · Ansible · Packer · cloud-init), encrypted DR backups, burst autoscaling, and a per-cluster observability stack.
+- **Platform / SRE** — self-managed multi-region k3s, Cilium eBPF CNI (`CiliumNetworkPolicy`), Infrastructure-as-Code (Terraform · Ansible · Packer · cloud-init), off-site DR backups with verified restores, burst autoscaling, and a per-cluster observability stack.
 - **Backend** — Java 21 / Spring Boot microservices, PostgreSQL per-service schemas, Redis, contract-tested API boundaries, RS256 JWT issuance and JWKS-based verification.
 - **Frontend** — Next.js / React / TypeScript with real-time WebSocket UIs, an API-contract CI gate, and production auth-flow hardening — twice (user dashboard + operator console).
 - **Security** — RS256 JWT pinning, BOLA/IDOR fail-closed authorization, network namespace isolation, MFA freshness, M2M API keys, two-person approval, automated abuse detection.

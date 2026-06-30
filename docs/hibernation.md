@@ -60,7 +60,7 @@ The state machine lives in two enums:
 
 - **Pass 1:** ACTIVE servers idle past `idleThresholdMinutes` → WARM (or HIBERNATED for FREE tier, skipping the graduated ladder).
 - **Pass 2:** WARM servers idle past `softFreezeThresholdMinutes` → SOFT_FROZEN (paid tiers only; Always-On flag skips this).
-- **Pass 3:** SOFT_FROZEN servers idle past `deepFreezeThresholdMinutes` → DEEP_FROZEN (gated by `FAST_RESTART_ENABLED` flag; Always-On flag skips this).
+- **Pass 3:** SOFT_FROZEN servers idle past `deepFreezeThresholdMinutes` → DEEP_FROZEN (gated by the `hibernation.deep-freeze.enabled` config flag, bound to `deepFreezeEnabled`, default `false`; Always-On servers skip this).
 
 The sweeper reads escalation candidates using a `pausedAt`-based query (servers must have been in the rung long enough, not just transitioned) to avoid immediately re-escalating a server that was just paused.
 
@@ -120,8 +120,8 @@ The DaemonSet is idempotent: it re-derives desired state from the live annotatio
 
 ### Wake from SOFT_FROZEN
 
-1. Wake trigger (TCP connection via platform-proxy, or explicit API call) → WAKE_REQUEST published to Redpanda.
-2. `server-service` consumes WAKE_REQUEST → calls `KubernetesOrchestrator.resumeContainer()`.
+1. Wake trigger: a TCP connection makes platform-proxy issue a **synchronous HTTP call** to hibernation-service (`HibernationClient.triggerWake` → `POST /internal/.../wake`, handled by `InternalWakeController`). hibernation-service then publishes a wake request to Redpanda (`HibernationEventPublisher.publishWakeRequest`).
+2. `server-service` consumes the wake request → calls `KubernetesOrchestrator.resumeContainer()`.
 3. `resumeContainer()` removes the `metrichost.net/swap-eligible` annotation and restores original CPU values via in-place resize.
 4. The `swap-reclaim` DaemonSet detects the annotation is gone → sets `memory.high = max` on the container's cgroup → kernel begins paging memory back in from swap as the JVM accesses it.
 5. Readiness probe passes when the game process is responsive. The proxy flushes its buffered TCP bytes.
@@ -134,7 +134,7 @@ The player-visible latency is the page-in time: typically 1–5 seconds for a se
 
 ### Current implementation: FAST_RESTART
 
-`KubernetesOrchestrator.deepFreeze()` is currently a FAST_RESTART fallback — it performs a graceful in-game save (sending a save-all command via RCON) and then stops the container cleanly, deleting the pod. The server's data is preserved on persistent storage. Wake (`deepRestore()`) recreates the pod from scratch — equivalent to a cold start.
+`KubernetesOrchestrator.deepFreeze()` is currently a FAST_RESTART fallback — it performs a graceful in-game save and stop by sending the game-type's stop command to the container's **stdin** (`CommandSandboxService.executeViaStdin`, resolved per game via `resolveStopCommand`), then deletes the pod. The server's data is preserved on persistent storage. Wake (`deepRestore()`) recreates the pod from scratch — equivalent to a cold start.
 
 The distinction from `STOPPED` is primarily at the state machine level: DEEP_FROZEN tracks that the escalation ladder led here (after SOFT_FROZEN) rather than a user explicitly stopping the server, so the wake path and billing treatment can differ. The code comments this explicitly: "FAST_RESTART fallback — graceful save + stop + cold restart" with a `TODO(WS-F): Replace with real CRIU/CRaC checkpoint once staging spike validates restore latency + state identity."
 
@@ -187,10 +187,9 @@ The flag has no effect on FREE tier servers: those follow the hard-hibernate pat
 
 From a player's point of view, the most important guarantee is that they never see "server offline" when the server is merely sleeping. The platform maintains this by:
 
-1. **platform-proxy** (Netty `NioEventLoopGroup`) listens on the game port (`:25565` for Minecraft). When a new TCP connection arrives, the proxy checks the server's hibernation state before forwarding.
-2. If the server is WARM or SOFT_FROZEN (or DEEP_FROZEN in FAST_RESTART mode), the proxy **buffers the TCP bytes** in a per-server `ConcurrentHashMap` and publishes a `WAKE_REQUEST` event to Redpanda.
-3. `hibernation-service` consumes the event and orchestrates the wake transition.
-4. `server-service` performs the necessary K8s operations (CPU restore, annotation removal).
+1. **platform-proxy** (Netty `NioEventLoopGroup`) listens on per-server TCP ports allocated from a base port (`30000`); the per-game default upstream target (e.g. `25565` for Minecraft) is what the proxy forwards *to*. When a new TCP connection arrives, the proxy checks the server's hibernation state before forwarding.
+2. If the server is WARM or SOFT_FROZEN (or DEEP_FROZEN in FAST_RESTART mode), the proxy **buffers the inbound bytes** in a per-server buffer and issues a **synchronous HTTP wake call** to hibernation-service.
+3. `hibernation-service` publishes a wake request to Redpanda; `server-service` consumes it and performs the K8s operations (CPU restore, annotation removal).
 5. Once the readiness probe passes, `server-service` publishes a `STATUS_CHANGED (ACTIVE)` event.
 6. `hibernation-service` consumes the event and signals the proxy.
 7. The proxy **flushes the buffered bytes** to the now-ready pod.
