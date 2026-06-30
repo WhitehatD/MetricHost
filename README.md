@@ -202,6 +202,7 @@ sequenceDiagram
     participant Kafka as Redpanda
     participant Srv as server-service
     participant K8s as Kubernetes API
+    participant PODS as Game Pod
 
     Player->>Proxy: TCP SYN (:25565)
 

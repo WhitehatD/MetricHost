@@ -50,6 +50,39 @@ A single-node k3s cluster carrying the regional data plane only: server-service,
 | `monitoring` | Prometheus, Grafana, Loki, Alertmanager, blackbox exporters. |
 | `kube-system` | `swap-reclaim` DaemonSet (plus standard k3s components). |
 
+```mermaid
+flowchart TB
+    Edge([Cloudflare Tunnels])
+
+    subgraph Cluster["EU Production Cluster · k3s"]
+        subgraph NS_MH["namespace: metrichost"]
+            GW[platform-gateway]
+            Svcs[9 Spring Boot services]
+            Data[(PG · Redis · Redpanda · MinIO)]
+        end
+        subgraph NS_GAME["namespace: game-servers · isolated"]
+            GamePods[Game Pods]
+        end
+        subgraph NS_ADM["namespace: metrichost-admin-api"]
+            AdminAPI[admin-api · Go]
+        end
+        subgraph NS_SYS["namespace: metrichost-system"]
+            CP2[control-plane · Temporal]
+        end
+        subgraph NS_MON["namespace: monitoring"]
+            Mon[Prometheus · Grafana · Loki]
+        end
+    end
+
+    Edge --> GW
+    GW --> Svcs --> Data
+    AdminAPI -->|cross-ns: JWKS + M2M| GW
+    CP2 -->|provision / destroy| GamePods
+    Mon -. scrapes .-> GW & Svcs & GamePods & AdminAPI & CP2
+```
+
+> NetworkPolicy default-denies cross-namespace traffic. `game-servers` cannot reach `metrichost`; `metrichost-admin-api` is allowed only specific ports (auth-service JWKS, server-service M2M). The control plane provisions and reclaims game nodes; monitoring scrapes every namespace.
+
 ---
 
 ## 3. Terraform Architecture

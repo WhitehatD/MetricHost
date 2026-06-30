@@ -20,13 +20,35 @@ This effect is the only mechanism that makes some regional deployments viable at
 
 The system descends four rungs, with progressively more resource reclamation and progressively longer wake latency at each step:
 
-```
-ACTIVE ─── t1 ───▶ WARM ─── t2 ───▶ SOFT_FROZEN ─── t3 ───▶ DEEP_FROZEN ─── t4 ───▶ STOPPED
-│                  │                 │                         │                         │
-│ Full CPU+RAM      │ CPU → 100m      │ CPU 100m                │ Process frozen           │ Pod deleted
-│ Process running   │ RAM resident    │ RAM paged to NVMe swap  │ to NVMe (FAST_RESTART:   │ Cold start
-│ Wake: <1s         │ Wake: <1s       │ Process alive            │ graceful stop)           │ 30-60s
-│                  │                 │ Wake: ~1-5s              │ Wake: ~1-5s restore      │
+| Rung | CPU | RAM | Wake latency | Mechanism |
+|---|---|---|---|---|
+| **ACTIVE** | full | full, resident | — | running normally |
+| **WARM** | throttled to `100m` | resident | < 1s | in-place CPU resize |
+| **SOFT_FROZEN** | `100m` | paged to NVMe swap, process alive | ~1-5s (page-in) | cgroup `memory.high` eviction |
+| **DEEP_FROZEN** | n/a | freed (FAST_RESTART: graceful stop) | ~1-5s restore | checkpoint (roadmap: CRaC/CRIU) |
+| **STOPPED / HIBERNATED** | n/a | freed, pod deleted | 30-60s cold start | pod delete |
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> ACTIVE
+
+    ACTIVE --> WARM : idle > t1 · paid tier
+    ACTIVE --> HIBERNATED : idle > t1 · free tier
+    ACTIVE --> STOPPED : explicit stop
+
+    WARM --> ACTIVE : wake / player connects
+    WARM --> SOFT_FROZEN : idle > t2 · paid, not Always-On
+
+    SOFT_FROZEN --> ACTIVE : player connects — page-in ~1-5s
+    SOFT_FROZEN --> DEEP_FROZEN : idle > t3 · FAST_RESTART gate
+
+    DEEP_FROZEN --> ACTIVE : wake — cold restart
+
+    HIBERNATED --> ACTIVE : wake — cold start 30-60s
+
+    STOPPED --> [*]
 ```
 
 The state machine lives in two enums:

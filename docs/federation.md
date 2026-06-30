@@ -23,6 +23,37 @@ Secondary benefits of region-direct:
 
 ## 2. The Two Planes
 
+```mermaid
+flowchart TB
+    Browser([User Browser]) --> CF[Cloudflare anycast]
+
+    subgraph EUPlane["EU Cluster · Global Control Plane"]
+        EUGW[platform-gateway]
+        AUTH[auth-service]
+        BILL[billing-service]
+        FLEET[user-service · fleet registry]
+        NOTIFY[notification-service]
+    end
+
+    subgraph HILPlane["US-West Cluster · Regional Data Plane"]
+        HILGW[platform-gateway]
+        HILSRV[server-service · hibernation · game-registry]
+        PROXY[platform-proxy · TCP]
+        HILPG[(PostgreSQL · regional schemas)]
+        HILRP[(Redpanda · regional)]
+    end
+
+    CF --> EUGW
+    CF -->|api-hil tunnel| HILGW
+
+    EUGW --> AUTH & BILL & FLEET & NOTIFY
+    EUGW -->|RegionRoutingFilter| HILGW
+
+    HILGW --> HILSRV & PROXY
+    HILSRV --> HILPG & HILRP
+    FLEET -.->|server_directory lookup| EUGW
+```
+
 ### Global control plane (EU cluster)
 
 The EU cluster runs everything that is inherently global:
@@ -204,28 +235,35 @@ sequenceDiagram
     participant CF as Cloudflare anycast
     participant EUGW as EU platform-gateway
     participant FleetDB as fleet.server_directory
+    participant BFF as Next.js BFF (frontend)
     participant HILGW as US-West platform-gateway
     participant HILSrv as US-West server-service
 
-    Note over Browser,CF: User navigates to a US-West server
+    Note over Browser,CF: REST data-plane op on a US-West server
 
-    Browser->>CF: GET /servers/{server-id}/console
+    Browser->>CF: GET /servers/{server-id}/files
     CF->>EUGW: Route via cloudflared tunnel (EU)
     EUGW->>EUGW: JWT verify (RS256, JWKS cached)
     EUGW->>EUGW: Rate limit check (tier bucket)
     EUGW->>FleetDB: RegionResolver.resolve(server-id) [60s TTL]
     FleetDB-->>EUGW: region = "hil"
 
-    Note over EUGW: RegionRoutingFilter rewrites GATEWAY_REQUEST_URL_ATTR
-    EUGW->>CF: Forward to api-hil.example.tld/servers/{id}/console
+    Note over EUGW: RegionRoutingFilter rewrites the upstream URL
+    EUGW->>CF: Forward to api-hil.example.tld/servers/{id}/files
     CF->>HILGW: Route via cloudflared tunnel (US-West)
     HILGW->>HILGW: JWT verify (same JWKS endpoint)
     HILGW->>HILSrv: Route to server-service (regional)
-    HILSrv-->>HILGW: Console stream response
-    HILGW-->>CF-->>EUGW-->>Browser: Response
+    HILSrv-->>HILGW: Response
+    HILGW-->>CF: Response
+    CF-->>EUGW: Response
+    EUGW-->>Browser: 200 OK
 
-    Note over Browser: WebSocket console uses BFF proxy
-    Browser->>CF: WS upgrade to /api/regional/hil/servers/{id}/ws
-    CF->>Browser: [same-origin via Next.js server]
-    Note over Browser: Next.js BFF /api/regional/hil/... proxies to api-hil.example.tld
+    Note over Browser,HILSrv: WebSocket console/metrics — same-origin BFF proxy
+    Browser->>CF: WS upgrade /api/regional/hil/ws/console
+    CF->>BFF: Same-origin route to platform-frontend
+    Note over BFF: /api/regional/[region]/[...path] handler
+    BFF->>CF: Proxy WS to api-hil.example.tld
+    CF->>HILGW: Route via US-West cloudflared tunnel
+    HILGW->>HILSrv: STOMP WS upgrade
+    HILSrv-->>Browser: Streaming STOMP frames
 ```
