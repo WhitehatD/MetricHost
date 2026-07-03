@@ -25,9 +25,11 @@
 
 ---
 
+> **Full case study:** how this platform actually works and why it is built this way, in plain English, at [ciocandco.com/work/metrichost](https://ciocandco.com/work/metrichost).
+
 MetricHost is an enterprise-grade, multi-tenant game-server hosting platform — comparable in scope to Pterodactyl plus Vercel, but architected as a distributed system rather than a panel. It supports Minecraft, Valheim, Terraria, Rust, and more.
 
-I led this as the architect and lead engineer, and I'm the one who carries the client relationship. The backend is mine in full — the nine Spring Boot microservices, the gateway and TCP proxy, the operator API, Stripe billing, the event-driven GDPR pipeline, and the six-repository CI/CD system — and so is the platform underneath it: self-managed multi-region k3s, the flannel→Cilium (eBPF) migration, the Terraform/Ansible/Packer/cloud-init IaC, off-site backups with verified restores, and the Prometheus/Grafana/Loki stack. I didn't build it alone, though. A second engineer I brought on — a frontend developer who also knew his way around infrastructure — sketched the first version of the frontend and stood up the first working control plane, and helped on the backend now and then. I carried the control plane the rest of the way to production, and made the frontend my own through integration and hardening.
+I led this as the architect and lead engineer, and I'm the one who carries the client relationship. The backend is mine in full — the nine Spring Boot microservices, the gateway and TCP proxy, the operator API, Stripe billing, the event-driven GDPR pipeline, and the six-repository CI/CD system — and so is the platform underneath it: self-managed multi-region k3s, the flannel→Cilium (eBPF) migration, the Terraform/Ansible/Packer/cloud-init IaC, off-site backups with verified restores, and the Prometheus/Grafana/Loki stack. I didn't build it alone, though. One other engineer worked alongside me — a frontend developer who also knew his way around infrastructure — and sketched the first version of the frontend, stood up the first working control plane, and helped on the backend now and then. I carried the control plane the rest of the way to production, and made the frontend my own through integration and hardening.
 
 Source code is proprietary. This repository documents the architecture and the engineering decisions behind it.
 
